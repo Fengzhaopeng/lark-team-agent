@@ -99,6 +99,35 @@ describe('agent prompt builder', () => {
     expect(prompt).not.toContain('<comment_context>');
   });
 
+  it('includes userAuthorized in bridge_context when the caller sets it', () => {
+    const prompt = buildAgentPrompt({
+      context: {
+        chatId: 'oc_group',
+        chatType: 'group',
+        senderId: 'ou_user',
+        source: 'im',
+        userAuthorized: false,
+      },
+      userInput: 'hello',
+    });
+
+    expect(readSection(prompt, 'bridge_context')).toMatchObject({ userAuthorized: false });
+  });
+
+  it('omits userAuthorized from bridge_context when unset', () => {
+    const prompt = buildAgentPrompt({
+      context: {
+        chatId: 'oc_dm',
+        chatType: 'p2p',
+        senderId: 'ou_owner',
+        source: 'im',
+      },
+      userInput: 'hello',
+    });
+
+    expect(readSection(prompt, 'bridge_context')).not.toHaveProperty('userAuthorized');
+  });
+
   it('keeps bridge agents inside the current lark-channel profile by default', () => {
     const source = readFileSync(join(process.cwd(), 'src/bot/channel.ts'), 'utf8');
 

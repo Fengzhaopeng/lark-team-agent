@@ -17,6 +17,12 @@ export interface BridgePromptContext {
   botOpenId?: string;
   /** Accounts @-mentioned in the triggering message(s), deduped across the batch. */
   mentions?: BridgePromptMention[];
+  /**
+   * Whether the sender currently has a ready personal Feishu OAuth token.
+   * Only meaningful when multi-user + user-default identity is active;
+   * `undefined` when that mode is off (no personal-identity concept applies).
+   */
+  userAuthorized?: boolean;
   threadId?: string;
   messageIds?: string[];
   source: BridgePromptSource;

@@ -6,6 +6,7 @@ import type {
 import { createLarkChannel } from '@larksuite/channel';
 import { basename, dirname, join } from 'node:path';
 import { claudeCapability, codexCapability } from '../agent/capability';
+import { NEED_USER_AUTH_SENTINEL } from '../agent/bridge-system-prompt';
 import { modelLabel, normalizeModelSelection, resolveModelArg } from '../agent/models';
 import {
   buildAgentPrompt,
@@ -963,6 +964,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       ]
     : undefined;
 
+  // Whether the sender currently has a ready personal Feishu OAuth token.
+  // Only meaningful when multi-user + user-default identity is active.
+  const userAuthMode =
+    userTokenRegistry !== undefined &&
+    controls.profileConfig.multiUser?.enabled === true &&
+    controls.profileConfig.larkCli.identityPreset === 'user-default';
+  const userAuthorized =
+    userAuthMode && userTokenRegistry ? !userTokenRegistry.needsAuth(firstMsg.senderId) : undefined;
+
   const prompt = buildPrompt(
     batch,
     attachments,
@@ -970,6 +980,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     topicContext,
     channel.botIdentity,
     extraInstructions,
+    userAuthorized,
   );
   log.info('prompt', 'built', {
     promptChars: prompt.length,
@@ -1009,18 +1020,22 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       ? codexCapability(controls.profileConfig)
       : claudeCapability(controls.profileConfig);
 
-  // Per-user OAuth gate: when multi-user mode + user-default lark-cli identity
-  // are both enabled, ensure the sender has an OAuth token before running the
-  // agent. If the token is missing, push an auth card to the sender's private
-  // chat and defer this run.
+  // Per-user OAuth gate — P2P ONLY. In p2p, the sender's personal identity is
+  // essentially always what a request needs (or the agent has no other user
+  // to fall back on), so we keep gating eagerly before the run: ensure the
+  // sender has an OAuth token, and if missing, push an auth card to their
+  // private chat and defer this run.
+  //
+  // In GROUP chats we deliberately do NOT gate here — the agent runs with
+  // bot identity by default, and only asks for personal auth on-demand (see
+  // the `[[NEED_USER_AUTH]]` sentinel handling in `sendFinalReply`) when it
+  // judges the specific request actually requires the sender's identity.
+  // Already-authorized senders still get their config dir wired up in groups
+  // so the agent can act as them without re-triggering the sentinel flow.
   let userLarkCliConfigDir: string | undefined;
-  if (
-    userTokenRegistry &&
-    controls.profileConfig.multiUser?.enabled &&
-    controls.profileConfig.larkCli.identityPreset === 'user-default'
-  ) {
+  if (userTokenRegistry && userAuthMode) {
     const senderId = firstMsg.senderId;
-    if (userTokenRegistry.needsAuth(senderId)) {
+    if (firstMsg.chatType === 'p2p' && userTokenRegistry.needsAuth(senderId)) {
       if (userTokenRegistry.isPending(senderId)) {
         // Auth already in progress — remind the user and skip this run.
         await channel.send(senderId, {
@@ -1031,37 +1046,33 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       }
 
       // Start a new auth flow.
-      try {
-        const authResult = await userTokenRegistry.startAuth(senderId, {
-          appId: appId ?? controls.profileConfig.accounts.app.id,
-          brand: appBrand ?? controls.profileConfig.accounts.app.tenant,
-          extraArgs: ['--recommend'],
-        });
-        const expiresInMinutes = authResult.expiresIn
-          ? Math.max(1, Math.round(authResult.expiresIn / 60))
-          : undefined;
-        const authMarkdown = buildOAuthPromptMarkdown({
-          verificationUrl: authResult.verificationUrl,
-          expiresInMinutes,
-        });
-        // Send the auth prompt to the user's private chat (open_id routing).
-        await channel.send(senderId, { markdown: authMarkdown });
-        // Notify in the current chat that auth is required.
-        await channel.send(chatId, {
-          markdown: '🔐 需要飞书授权才能以你的身份操作文档，授权链接已私信发给你，完成后请重新发送消息。',
-        }, sendOpts);
-        log.info('user-auth', 'initiated', { sender: senderId.slice(-6) });
-      } catch (err) {
-        log.fail('user-auth', err, { step: 'start-auth', sender: senderId.slice(-6) });
-        await channel.send(chatId, {
-          markdown: '❌ 发起授权失败，请稍后重试或联系管理员。',
-        }, sendOpts);
-      }
+      await startUserAuthFlow({
+        channel,
+        userTokenRegistry,
+        senderId,
+        chatId,
+        sendOpts,
+        appId: appId ?? controls.profileConfig.accounts.app.id,
+        appBrand: appBrand ?? controls.profileConfig.accounts.app.tenant,
+      });
       return;
     }
 
     userLarkCliConfigDir = userTokenRegistry.getLarkCliConfigDir(senderId);
   }
+
+  // Wire up the on-demand sentinel trigger for group chats only — p2p never
+  // sees `[[NEED_USER_AUTH]]` since the eager gate above already resolved
+  // auth before the agent ran.
+  const userAuthTrigger =
+    userTokenRegistry && userAuthMode && firstMsg.chatType !== 'p2p'
+      ? {
+          userTokenRegistry,
+          senderId: firstMsg.senderId,
+          appId: appId ?? controls.profileConfig.accounts.app.id,
+          appBrand: appBrand ?? controls.profileConfig.accounts.app.tenant,
+        }
+      : undefined;
 
   const flow = await startRunFlow({
     scopeId: scope,
@@ -1223,6 +1234,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           replyMode,
           sendOpts,
           cardRenderOptions,
+          userAuthTrigger,
         });
         return;
       }
@@ -1293,6 +1305,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           replyMode,
           sendOpts,
           cardRenderOptions,
+          userAuthTrigger,
         });
       }
     } else if (replyMode === 'markdown') {
@@ -1352,6 +1365,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           replyMode,
           sendOpts,
           cardRenderOptions,
+          userAuthTrigger,
         });
       }
     } else {
@@ -1377,6 +1391,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         replyMode,
         sendOpts,
         cardRenderOptions,
+        userAuthTrigger,
       });
     }
   } catch (err) {
@@ -1418,7 +1433,7 @@ async function recallIfEmptyStreamedReply(
   }
 }
 
-async function sendFinalReply(input: {
+export async function sendFinalReply(input: {
   channel: LarkChannel;
   chatId: string;
   scope: string;
@@ -1426,8 +1441,43 @@ async function sendFinalReply(input: {
   replyMode: ReturnType<typeof getMessageReplyMode>;
   sendOpts: { replyTo: string; replyInThread?: boolean };
   cardRenderOptions: { signCallback?: (action: string) => string };
+  /**
+   * On-demand personal-identity auth (group chats only): when set and the
+   * agent's entire reply is exactly `NEED_USER_AUTH_SENTINEL`, suppress it
+   * and trigger the real OAuth flow instead of showing the sentinel to the
+   * user. Omitted in p2p call sites, where the eager pre-run gate already
+   * handles auth and the agent is never told to emit this sentinel.
+   */
+  userAuthTrigger?: {
+    userTokenRegistry: UserTokenRegistry;
+    senderId: string;
+    appId: string;
+    appBrand?: string;
+  };
 }): Promise<void> {
   const body = renderText(input.state);
+
+  if (input.userAuthTrigger && body.trim() === NEED_USER_AUTH_SENTINEL) {
+    log.info('outbound', 'suppress-sentinel', { scope: input.scope });
+    const { userTokenRegistry, senderId, appId, appBrand } = input.userAuthTrigger;
+    if (userTokenRegistry.isPending(senderId)) {
+      await input.channel.send(senderId, {
+        markdown: '⏳ 正在等待你完成授权，请检查私聊中的授权链接并完成操作，然后重新发送消息。',
+      });
+      log.info('user-auth', 'pending', { sender: senderId.slice(-6) });
+      return;
+    }
+    await startUserAuthFlow({
+      channel: input.channel,
+      userTokenRegistry,
+      senderId,
+      chatId: input.chatId,
+      sendOpts: input.sendOpts,
+      appId,
+      appBrand,
+    });
+    return;
+  }
 
   // Nothing deliverable to send (agent produced no text on a clean finish;
   // error/interrupt/timeout keep `body` non-empty via their notices). Skip
@@ -1463,6 +1513,50 @@ async function sendFinalReply(input: {
     );
     requireMessageReceipt(result, 'text');
     log.info('outbound', 'sent', outboundLogFields(input, 'text', body, result));
+  }
+}
+
+/**
+ * Starts a device-code OAuth flow for `senderId` and surfaces it: the
+ * verification link goes to their private chat, and the triggering chat gets
+ * a short notice. Shared by the p2p eager gate and the group on-demand
+ * `[[NEED_USER_AUTH]]` sentinel path.
+ */
+async function startUserAuthFlow(input: {
+  channel: LarkChannel;
+  userTokenRegistry: UserTokenRegistry;
+  senderId: string;
+  chatId: string;
+  sendOpts: { replyTo: string; replyInThread?: boolean };
+  appId: string;
+  appBrand?: string;
+}): Promise<void> {
+  const { channel, userTokenRegistry, senderId, chatId, sendOpts, appId, appBrand } = input;
+  try {
+    const authResult = await userTokenRegistry.startAuth(senderId, {
+      appId,
+      brand: appBrand,
+      extraArgs: ['--recommend'],
+    });
+    const expiresInMinutes = authResult.expiresIn
+      ? Math.max(1, Math.round(authResult.expiresIn / 60))
+      : undefined;
+    const authMarkdown = buildOAuthPromptMarkdown({
+      verificationUrl: authResult.verificationUrl,
+      expiresInMinutes,
+    });
+    // Send the auth prompt to the user's private chat (open_id routing).
+    await channel.send(senderId, { markdown: authMarkdown });
+    // Notify in the current chat that auth is required.
+    await channel.send(chatId, {
+      markdown: '🔐 需要飞书授权才能以你的身份操作文档，授权链接已私信发给你，完成后请重新发送消息。',
+    }, sendOpts);
+    log.info('user-auth', 'initiated', { sender: senderId.slice(-6) });
+  } catch (err) {
+    log.fail('user-auth', err, { step: 'start-auth', sender: senderId.slice(-6) });
+    await channel.send(chatId, {
+      markdown: '❌ 发起授权失败，请稍后重试或联系管理员。',
+    }, sendOpts);
   }
 }
 
@@ -1759,6 +1853,7 @@ function buildPrompt(
   topicContext: QuotedContext[] = [],
   botIdentity?: { openId: string; name?: string },
   extraInstructions?: string[],
+  userAuthorized?: boolean,
 ): string {
   const first = batch[0];
   if (!first) return '';
@@ -1794,6 +1889,7 @@ function buildPrompt(
       ...(senderType ? { senderType } : {}),
       ...(botIdentity?.openId ? { botOpenId: botIdentity.openId } : {}),
       ...(mentions.length > 0 ? { mentions } : {}),
+      ...(userAuthorized !== undefined ? { userAuthorized } : {}),
       ...(first.threadId ? { threadId: first.threadId } : {}),
       messageIds: batch.map((m) => m.messageId),
       source: 'im',

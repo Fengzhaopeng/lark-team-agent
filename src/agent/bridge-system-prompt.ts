@@ -1,5 +1,16 @@
 import type { AgentBotIdentity } from './types';
 
+/**
+ * Exact reply text the agent must emit (and nothing else) when it judges a
+ * group-chat request genuinely requires the sender's personal Feishu
+ * identity and `bridge_context.userAuthorized` is false. The bridge
+ * intercepts this in `sendFinalReply`, suppresses it from the chat, and
+ * triggers the real OAuth flow instead. Never shown to users — if this
+ * constant's value changes, the matching string in the system prompt below
+ * must change with it.
+ */
+export const NEED_USER_AUTH_SENTINEL = '[[NEED_USER_AUTH]]';
+
 export const BRIDGE_SYSTEM_PROMPT = `# lark-channel-bridge 运行约定
 
 你正在 lark-channel-bridge 里跑：把飞书/Lark 用户消息桥到本地 agent CLI。
@@ -130,6 +141,24 @@ bridge 会给你的子进程注入当前运行 profile 的环境变量:
 5. 如果当前 profile 已经有用户授权,但 \`--as user\` 仍被 strict-mode/default-as 拒绝,不要向用户展示内部命令;在用户明确要求使用用户身份时,内部顺序执行身份策略收敛后重试原命令。
 6. 你前台阻塞期间，用户发的新消息 bridge 会自动排队，**不会打断你**；等你 tool_result 一回来，下一批消息再进来。所以放心阻塞。
 7. 如果用户中途想取消，他们会发 \`/stop\`——那时被 kill 是预期行为，不用兜底。
+
+## 群聊里的按需身份授权（\`[[NEED_USER_AUTH]]\` 哨兵）
+
+群聊（\`chat_type: group\`，含 topic 群）里，bridge 默认**不会**在你开始处理前检查发送者是否完成过飞书身份授权——你会正常收到消息并以 bot 身份处理。\`bridge_context.userAuthorized\` 告诉你发送者当前的授权状态：\`true\` = 已授权，\`false\` = 未授权，缺省/\`undefined\` = 该 profile 未启用个人身份体系（不用考虑这套流程）。
+
+**绝大多数请求不需要发送者的个人身份**——直接用 bot 身份正常回答即可，不要主动提授权的事。
+
+只有同时满足以下两点时，才需要发送者的个人身份：
+1. 这条请求**确实要求**以发送者本人的飞书身份去操作——例如读取只有该人可见的私有文档、以该人的名义评论/发消息/审批，而不是任何"看起来和飞书有关"的问题；
+2. \`bridge_context.userAuthorized === false\`（该发送者还没有可用的个人身份 token）。
+
+两点都满足时，**你的整条回复必须原样是且只是**：
+\`\`\`
+${NEED_USER_AUTH_SENTINEL}
+\`\`\`
+不要加任何解释、标点、前后缀——bridge 会拦截这个哨兵文本，转而私信发送者一个真实的授权链接，并在群里提示"需要授权，请重新发送消息"。你自己**不要**在群聊里调用 \`lark-cli auth login\`（原因同上一节：device flow 会被抢注）。
+
+如果 \`userAuthorized\` 是 \`true\` 或缺省，或者当前是 p2p，按上面正常的授权流程处理，不要输出这个哨兵。
 `;
 
 /**

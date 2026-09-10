@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   BRIDGE_SYSTEM_PROMPT,
+  NEED_USER_AUTH_SENTINEL,
   buildBridgeSystemPrompt,
   prefixBridgeSystemPrompt,
 } from '../../../src/agent/bridge-system-prompt';
@@ -36,6 +37,22 @@ describe('bridge system prompt bot collaboration rules', () => {
   it('tells the agent not to mimic the batch sender annotation format', () => {
     expect(BRIDGE_SYSTEM_PROMPT).toContain('[名字 (user|bot)]');
     expect(BRIDGE_SYSTEM_PROMPT).toContain('不要模仿');
+  });
+});
+
+describe('on-demand group auth sentinel', () => {
+  it('documents the exact sentinel text the agent must emit', () => {
+    expect(NEED_USER_AUTH_SENTINEL).toBe('[[NEED_USER_AUTH]]');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain(NEED_USER_AUTH_SENTINEL);
+  });
+
+  it('gates the sentinel on both userAuthorized being false and genuine need', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('userAuthorized === false');
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('绝大多数请求不需要发送者的个人身份');
+  });
+
+  it('tells the agent not to run lark-cli auth login itself in groups for this flow', () => {
+    expect(BRIDGE_SYSTEM_PROMPT).toContain('你自己**不要**在群聊里调用');
   });
 });
 

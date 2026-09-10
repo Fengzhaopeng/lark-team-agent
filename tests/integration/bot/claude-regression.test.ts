@@ -57,7 +57,7 @@ describe('Claude IM regression boundaries', () => {
     const source = await readFile(join(process.cwd(), 'src/bot/channel.ts'), 'utf8');
 
     expect(source).toContain('respondToMentionAll: false');
-    expect(source).toContain('getRequireMentionInGroup(controls.cfg)');
+    expect(source).toContain('getChatRequireMention(controls.cfg, msg.chatId)');
     expect(source).toContain('!msg.mentionedBot');
     expect(source).toContain('msg.chatType !== \'p2p\'');
   });

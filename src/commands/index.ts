@@ -28,6 +28,7 @@ import { helpCard, resumeCard, statusCard, workspacesCard } from '../card/templa
 import type { AppConfig, AppPreferences, MessageReplyMode, TenantBrand } from '../config/schema';
 import {
   getAgentStopGraceMs,
+  getChatRequireMention,
   getCotMessages,
   getImageDefaultModel,
   getMaxConcurrentRuns,
@@ -192,6 +193,8 @@ const handlers: Record<string, Handler> = {
   '/doc': handleDoc,
   '/invite': handleInvite,
   '/remove': handleRemove,
+  '/@bot': handleAtBot,
+  '/quota': handleQuota,
 };
 
 /**
@@ -210,6 +213,8 @@ const ADMIN_COMMANDS = new Set([
   '/ws',
   '/invite',
   '/remove',
+  '/@bot',
+  '/quota',
 ]);
 
 function isAdminCommand(cmd: string): boolean {
@@ -2793,4 +2798,187 @@ async function savePreferencesConfig(
     ctx.controls.profileConfig = root.profiles[ctx.controls.profile]!;
     ctx.controls.cfg = runtimeProfileConfig(root, ctx.controls.profile);
   });
+}
+
+/**
+ * /@bot on|off|status — per-chat override for the @-mention requirement.
+ *
+ * - `/@bot on`     require @-mention in this chat (override global)
+ * - `/@bot off`    respond without @-mention in this chat (override global)
+ * - `/@bot reset`  remove override, revert to global setting
+ * - `/@bot status` show current effective setting for this chat
+ * - `/@bot`        same as status
+ *
+ * Only works in group chats (p2p is always unrestricted regardless).
+ * Restricted to admins.
+ */
+async function handleAtBot(args: string, ctx: CommandContext): Promise<void> {
+  if (ctx.msg.chatType === 'p2p') {
+    await reply(ctx, '私聊不需要 @bot，此指令仅在群聊中有效。');
+    return;
+  }
+
+  const chatId = ctx.msg.chatId;
+  const sub = args.trim().toLowerCase();
+
+  if (sub === 'status' || sub === '') {
+    const overrides = ctx.controls.cfg.preferences?.chatMentionOverrides ?? {};
+    const globalVal = getRequireMentionInGroup(ctx.controls.cfg);
+    const effective = getChatRequireMention(ctx.controls.cfg, chatId);
+    const hasOverride = chatId in overrides;
+    const lines = [
+      `**当前群 @bot 设置**`,
+      `- 全局默认：${globalVal ? '需要 @bot' : '无需 @bot'}`,
+      `- 本群覆盖：${hasOverride ? (overrides[chatId] ? '需要 @bot（on）' : '无需 @bot（off）') : '未设置（跟全局）'}`,
+      `- 当前生效：**${effective ? '需要 @bot' : '无需 @bot'}**`,
+      '',
+      '用 `/@bot on` / `/@bot off` 设置本群，`/@bot reset` 恢复全局。',
+    ];
+    await reply(ctx, lines.join('\n'));
+    return;
+  }
+
+  if (sub !== 'on' && sub !== 'off' && sub !== 'reset') {
+    await reply(ctx, '用法：`/@bot on` | `/@bot off` | `/@bot reset` | `/@bot status`');
+    return;
+  }
+
+  const prefs = ctx.controls.cfg.preferences ?? {};
+  const overrides = { ...(prefs.chatMentionOverrides ?? {}) };
+
+  if (sub === 'reset') {
+    delete overrides[chatId];
+    const globalVal = getRequireMentionInGroup(ctx.controls.cfg);
+    ctx.controls.cfg.preferences = { ...prefs, chatMentionOverrides: overrides };
+    await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
+    await reply(ctx, `已移除本群覆盖，恢复全局设置（${globalVal ? '需要 @bot' : '无需 @bot'}）。`);
+    return;
+  }
+
+  const newVal = sub === 'on';
+  overrides[chatId] = newVal;
+  ctx.controls.cfg.preferences = { ...prefs, chatMentionOverrides: overrides };
+  await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
+  await reply(
+    ctx,
+    newVal
+      ? '已设置：本群需要 @bot 才响应（覆盖全局）。'
+      : '已设置：本群无需 @bot，任意消息均响应（覆盖全局）。',
+  );
+}
+
+/**
+ * /quota — query usage and remaining balance for each key in the API key pool.
+ *
+ * Reads ANTHROPIC_API_KEY_POOL (comma-separated) and ANTHROPIC_BASE_URL from
+ * the environment. Falls back to ANTHROPIC_API_KEY when no pool is defined.
+ * Calls GET <baseUrl>/api/usage/token/ for each key concurrently and renders
+ * a summary table.
+ *
+ * Admin-only command.
+ */
+async function handleQuota(_args: string, ctx: CommandContext): Promise<void> {
+  const baseUrl = (process.env['ANTHROPIC_BASE_URL'] ?? '').replace(/\/$/, '');
+  if (!baseUrl) {
+    await reply(ctx, 'ANTHROPIC_BASE_URL 未设置，无法查询配额（此功能仅适用于 modelproxy 代理）。');
+    return;
+  }
+
+  const poolEnv = process.env['ANTHROPIC_API_KEY_POOL'] ?? '';
+  const singleKey = process.env['ANTHROPIC_API_KEY'] ?? '';
+  const rawKeys = poolEnv
+    ? poolEnv.split(',').map((k) => k.trim()).filter(Boolean)
+    : singleKey
+      ? [singleKey]
+      : [];
+
+  if (rawKeys.length === 0) {
+    await reply(ctx, '未找到 ANTHROPIC_API_KEY_POOL 或 ANTHROPIC_API_KEY，无法查询配额。');
+    return;
+  }
+
+  await reply(ctx, `正在查询 ${rawKeys.length} 个 key 的配额…`);
+
+  interface QuotaResult {
+    key: string;
+    ok: boolean;
+    name?: string;
+    remaining?: number;
+    used?: number;
+    total?: number;
+    unlimited?: boolean;
+    error?: string;
+  }
+
+  const results = await Promise.all(
+    rawKeys.map(async (key): Promise<QuotaResult> => {
+      const shortKey = `…${key.slice(-8)}`;
+      try {
+        const resp = await fetch(`${baseUrl}/api/usage/token/`, {
+          headers: {
+            Authorization: `Bearer ${key}`,
+            'User-Agent': 'lark-channel-bridge/quota',
+          },
+          signal: AbortSignal.timeout(10_000),
+        });
+        const json = (await resp.json()) as {
+          code?: number;
+          data?: {
+            name?: string;
+            unlimited_quota?: boolean;
+            total_available?: number;
+            total_used?: number;
+            total_granted?: number;
+          };
+          message?: string;
+        };
+        if (json.code && json.data) {
+          const d = json.data;
+          if (d.unlimited_quota) {
+            return { key: shortKey, ok: true, name: d.name, unlimited: true };
+          }
+          return {
+            key: shortKey,
+            ok: true,
+            name: d.name,
+            remaining: (d.total_available ?? 0) / 500000,
+            used: (d.total_used ?? 0) / 500000,
+            total: (d.total_granted ?? 0) / 500000,
+          };
+        }
+        return { key: shortKey, ok: false, error: json.message ?? `HTTP ${resp.status}` };
+      } catch (err) {
+        return { key: shortKey, ok: false, error: String(err) };
+      }
+    }),
+  );
+
+  const lines: string[] = ['**API Key 配额报告**', ''];
+  let totalRemaining = 0;
+  let totalUsed = 0;
+
+  for (const r of results) {
+    if (!r.ok) {
+      lines.push(`- \`${r.key}\` ❌ ${r.error}`);
+      continue;
+    }
+    if (r.unlimited) {
+      lines.push(`- \`${r.key}\` [${r.name ?? ''}] 无限额度`);
+      continue;
+    }
+    const rem = r.remaining ?? 0;
+    const used = r.used ?? 0;
+    const total = r.total ?? 0;
+    totalRemaining += rem;
+    totalUsed += used;
+    const pct = total > 0 ? Math.round((used / total) * 100) : 0;
+    lines.push(
+      `- \`${r.key}\` [${r.name ?? ''}] 剩余 **$${rem.toFixed(2)}** / 已用 $${used.toFixed(2)} / 总 $${total.toFixed(2)} (${pct}%)`,
+    );
+  }
+
+  lines.push('');
+  lines.push(`**汇总：剩余 $${totalRemaining.toFixed(2)}，已用 $${totalUsed.toFixed(2)}**`);
+
+  await reply(ctx, lines.join('\n'));
 }

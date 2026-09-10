@@ -141,6 +141,12 @@ export interface AppPreferences {
    * Cloud-doc comments still require @-mention unconditionally.
    */
   requireMentionInGroup?: boolean;
+  /**
+   * Per-chat override for `requireMentionInGroup`. Keys are chat IDs
+   * (`oc_xxx`); values override the global `requireMentionInGroup` for that
+   * specific chat only. Written by the `/@bot on/off` command.
+   */
+  chatMentionOverrides?: Record<string, boolean>;
   /** Access control — user/chat allowlists + admin gating. See AppAccess. */
   access?: AppAccess;
   /**
@@ -263,11 +269,19 @@ export function getRequireMentionInGroup(cfg: AppConfig): boolean {
 }
 
 /**
- * Resolve the global default idle-timeout in ms. Returns `undefined` when
- * disabled (the default). Clamps to [1, 120] minutes when set so a typo
- * can't lock the bot into a 1-second kill loop or wait forever to a number
- * the user didn't really mean.
+ * Resolve whether @-mention is required for a specific chat. Per-chat
+ * overrides (`chatMentionOverrides`) take precedence over the global
+ * `requireMentionInGroup` setting. Returns the global value when no
+ * override is set for the given chatId.
  */
+export function getChatRequireMention(cfg: AppConfig, chatId: string): boolean {
+  const override = cfg.preferences?.chatMentionOverrides?.[chatId];
+  if (override !== undefined) {
+    return override;
+  }
+  return getRequireMentionInGroup(cfg);
+}
+
 /**
  * Grace period before SIGKILL fallback when stopping a claude subprocess.
  * Returns ms. Defaults to 5000 (5 seconds). Clamps to [100, 30000] so a

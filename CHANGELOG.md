@@ -1,5 +1,11 @@
 # 更新日志
 
+## v0.6.3（2026-09-10）
+
+### 修复
+
+- **团队模式与按需身份授权融合** — v0.6.2 新增的群聊按需授权逻辑（`userTokenRegistry` 构建、`userAuthMode` 判定）此前直接读取原始 `larkCli.identityPreset` 字段，未经过既有的团队模式覆盖机制 `effectiveLarkCliIdentity()`。由于 `/config` 在切回个人模式时会保留切换前保存的 `identityPreset`（团队模式下不清空，以便切回个人模式时恢复生效），存在"当前处于团队模式但 `identityPreset` 残留为 `user-default`"的合法状态；此状态下按需授权逻辑会被错误激活，与团队模式"强制仅使用应用身份"的既定语义冲突。新增 `isUserAuthModeActive()`（`src/config/profile-schema.ts`），统一封装"多用户开启 + 有效身份为 `user-default`"的判断并经由 `effectiveLarkCliIdentity()` 解析，`channel.ts` 中两处相关判断均改为调用该函数。`/config` 命令的 UI 与持久化逻辑未改动。
+
 ## v0.6.2（2026-09-10）
 
 ### 变更

@@ -31,6 +31,7 @@ import {
 import { renderText } from '../card/text-renderer';
 import { tryHandleCommand, type Controls } from '../commands';
 import type { AppConfig } from '../config/schema';
+import { isUserAuthModeActive } from '../config/profile-schema';
 import {
   getAgentStopGraceMs,
   getCotMessages,
@@ -310,13 +311,15 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     await resolvedUserRegistry.load();
   }
 
-  // Per-user OAuth token registry: active when multi-user + user-default identity.
+  // Per-user OAuth token registry: active when multi-user + user-default
+  // identity are both in effect. Read through isUserAuthModeActive() rather
+  // than the raw stored preset — team mode forces bot-only regardless of what
+  // identityPreset was last saved as (it's preserved for when the profile
+  // switches back to personal), so a profile currently in team mode must
+  // never spin this up even if it was previously configured for
+  // user-default in personal mode.
   let userTokenRegistry: UserTokenRegistry | undefined;
-  if (
-    controls.profileConfig.multiUser?.enabled &&
-    controls.profileConfig.larkCli.identityPreset === 'user-default' &&
-    deps.appPaths
-  ) {
+  if (isUserAuthModeActive(controls.profileConfig) && deps.appPaths) {
     const baseDir = join(dirname(deps.appPaths.secretsFile), 'user-tokens');
     userTokenRegistry = new UserTokenRegistry({
       baseDir,
@@ -965,11 +968,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     : undefined;
 
   // Whether the sender currently has a ready personal Feishu OAuth token.
-  // Only meaningful when multi-user + user-default identity is active.
-  const userAuthMode =
-    userTokenRegistry !== undefined &&
-    controls.profileConfig.multiUser?.enabled === true &&
-    controls.profileConfig.larkCli.identityPreset === 'user-default';
+  // Only meaningful when multi-user + user-default identity is active. Reads
+  // isUserAuthModeActive() — same reasoning as the registry construction
+  // above — so a profile currently in team mode never gates or sentinels on
+  // personal identity, even if identityPreset was left as 'user-default' from
+  // a prior personal-mode configuration.
+  const userAuthMode = userTokenRegistry !== undefined && isUserAuthModeActive(controls.profileConfig);
   const userAuthorized =
     userAuthMode && userTokenRegistry ? !userTokenRegistry.needsAuth(firstMsg.senderId) : undefined;
 

@@ -1,6 +1,6 @@
 {
   "name": "lark-team-agent",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Team-grade Feishu/Lark bridge for local Claude Code / Codex CLI agents, with multi-user workspace isolation",
   "type": "module",
   "packageManager": "pnpm@10.33.0",

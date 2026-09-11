@@ -133,6 +133,21 @@ export function effectiveLarkCliIdentity(
   return profile.mode === 'team' ? 'bot-only' : profile.larkCli.identityPreset;
 }
 
+/**
+ * True when per-user Feishu OAuth (personal identity, isolated token per
+ * sender) is actually in effect for this profile — i.e. multi-user is on
+ * AND the *effective* lark-cli identity (after the team-mode override) is
+ * `user-default`. Team mode forces bot-only regardless of what
+ * `larkCli.identityPreset` was last saved as, so every call site that gates
+ * or triggers per-user OAuth (registry construction, the sentinel-auth
+ * prompt, etc.) must check this instead of reading `identityPreset` raw.
+ */
+export function isUserAuthModeActive(
+  profile: Pick<ProfileConfig, 'mode' | 'larkCli' | 'multiUser'>,
+): boolean {
+  return profile.multiUser?.enabled === true && effectiveLarkCliIdentity(profile) === 'user-default';
+}
+
 export interface RootConfig {
   schemaVersion: 2;
   activeProfile: string;

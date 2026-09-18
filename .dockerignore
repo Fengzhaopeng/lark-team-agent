@@ -1,0 +1,17 @@
+.git/
+node_modules/
+dist/
+coverage/
+.corepack/
+*.log
+*.tsbuildinfo
+.env
+.env.local
+.env.*.local
+.npmrc
+.DS_Store
+.idea/
+.vscode/
+tests/
+tests-smoke/
+.github/

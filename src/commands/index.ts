@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { claudeCapability, codexCapability } from '../agent/capability';
 import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agent/models';
@@ -372,10 +372,23 @@ async function handleNewChat(rawName: string, ctx: CommandContext): Promise<void
     return;
   }
 
-  // Inherit cwd: multi-user p2p scope is senderId, so cwdFor(scope) returns
-  // the user's personal workspace. Group scope falls back to sourceCwd from
-  // the originating chat. Either way the new group starts in a meaningful dir.
-  const inheritCwd = sourceCwd ?? ctx.workspaces.cwdFor(ctx.msg.senderId);
+  // Default the new group to the invoker's personal workspace. In multi-user
+  // mode `cwdFor(senderId)` is the personal dir (`/workspace/<pinyin>`), which
+  // is what the user expects a fresh chat to start in. Previously the source
+  // chat's cwd won outright, so running `/new chat` from a group bound to
+  // `/workspace/shared` (or someone else's dir) produced a new group parked in
+  // the wrong place.
+  //
+  // Exception: when the source chat already sits inside the invoker's own
+  // workspace (e.g. `.../projects/<x>`), keep that subdir — this preserves the
+  // "spin up a group for this project" flow. Falls back to the source cwd when
+  // no personal workspace is recorded (non multi-user mode, or a user who has
+  // only ever spoken in groups).
+  const personalCwd = ctx.workspaces.cwdFor(ctx.msg.senderId);
+  const inheritCwd =
+    personalCwd && sourceCwd && isWithinDirectory(sourceCwd, personalCwd)
+      ? sourceCwd
+      : (personalCwd ?? sourceCwd);
   if (inheritCwd) {
     ctx.workspaces.setCwd(created.chatId, inheritCwd);
   }
@@ -768,6 +781,16 @@ async function listCodexResumeHistory(
 
 function effectiveWorkspaceCwd(ctx: CommandContext): string | undefined {
   return ctx.workspaces.cwdFor(ctx.scope) ?? ctx.controls.profileConfig.workspaces.default;
+}
+
+/**
+ * True when `child` is `parent` itself or nested under it. Uses path math
+ * rather than string prefixes so `/workspace/u2` is not treated as being
+ * inside `/workspace/u`.
+ */
+function isWithinDirectory(child: string, parent: string): boolean {
+  const rel = relative(parent, child);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 function selectedResumeCwd(ctx: CommandContext): string | undefined {

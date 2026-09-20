@@ -49,6 +49,7 @@ type StoredProfileConfig = Pick<
   ProfileConfig,
   | 'schemaVersion'
   | 'agentKind'
+  | 'mode'
   | 'accounts'
   | 'secrets'
   | 'preferences'
@@ -87,6 +88,10 @@ function serializeProfileConfig(profile: ProfileConfig): StoredProfileConfig {
   return {
     schemaVersion: profile.schemaVersion,
     agentKind: profile.agentKind,
+    // Must be persisted: `normalizeProfileConfig` defaults a missing `mode`
+    // back to 'personal', so dropping it silently downgrades a team deployment
+    // on the next start (team mode forces the bot-only lark-cli identity).
+    mode: profile.mode,
     accounts: profile.accounts,
     ...(profile.secrets ? { secrets: profile.secrets } : {}),
     preferences: profile.preferences,
@@ -99,6 +104,49 @@ function serializeProfileConfig(profile: ProfileConfig): StoredProfileConfig {
     larkCli: profile.larkCli,
     ...(profile.multiUser ? { multiUser: profile.multiUser } : {}),
   };
+}
+
+/** Root-level inputs used to heal a missing or damaged root config. */
+export interface UpdateProfileInRootConfigOptions {
+  configPath: string;
+  profile: string;
+  /** Live profile config, re-wrapped into a root when the file is unusable. */
+  fallback: ProfileConfig;
+  /** Root-level secrets; applied to the root whenever provided. */
+  secrets?: RootConfig['secrets'];
+}
+
+/**
+ * Read-modify-write one profile inside the root config, under the config file
+ * lock — and guarantee the file keeps the *root* layout.
+ *
+ * `config.json` holds a {@link RootConfig}, and {@link isRootConfig} requires a
+ * `profiles` object. Writing a bare {@link ProfileConfig} to that path is
+ * silently destructive: the file still parses as JSON, but every subsequent
+ * {@link loadRootConfig} returns `undefined`, so the next start treats the
+ * bridge as freshly installed and rebuilds an empty default profile — wiping
+ * the whitelist, admins and every other setting. The legacy flat
+ * `saveConfig()` serializes its argument verbatim and does exactly that, which
+ * is why settings mutations must come through here instead.
+ *
+ * When the on-disk root is unusable we re-wrap the in-memory profile rather
+ * than writing another headerless config, so the write heals the file instead
+ * of re-breaking it.
+ */
+export async function updateProfileInRootConfig(
+  opts: UpdateProfileInRootConfigOptions,
+  mutate: (profile: ProfileConfig, root: RootConfig) => ProfileConfig | void,
+): Promise<RootConfig> {
+  return withConfigFileLock(opts.configPath, async () => {
+    const existing = await loadRootConfig(opts.configPath);
+    const root = existing ?? createRootConfig(opts.profile, opts.fallback, opts.secrets);
+    if (opts.secrets) root.secrets = opts.secrets;
+    const current = root.profiles[opts.profile] ?? opts.fallback;
+    const next = mutate(current, root) ?? current;
+    root.profiles[opts.profile] = next;
+    await saveRootConfig(root, opts.configPath);
+    return root;
+  });
 }
 
 export async function withConfigFileLock<T>(configPath: string, fn: () => Promise<T>): Promise<T> {

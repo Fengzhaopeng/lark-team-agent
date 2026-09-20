@@ -45,15 +45,14 @@ import type {
   ProfileAccess,
   ProfileConfig,
   ProfileMode,
+  RootConfig,
 } from '../config/profile-schema';
 import { effectiveLarkCliIdentity } from '../config/profile-schema';
 import { resolveAppPaths } from '../config/app-paths';
 import { accessToClaudePermissionMode } from '../config/permissions';
 import {
-  loadRootConfig,
   runtimeProfileConfig,
-  saveRootConfig,
-  withConfigFileLock,
+  updateProfileInRootConfig,
 } from '../config/profile-store';
 import {
   canRunAdminCommand,
@@ -62,7 +61,7 @@ import {
   type OwnerRefreshState,
 } from '../policy/access';
 import { setSecret } from '../config/keystore';
-import { buildEncryptedAccountConfig, saveConfig } from '../config/store';
+import { buildEncryptedAccountConfig } from '../config/store';
 import { log, reportMetric } from '../core/logger';
 import { renderCard } from '../card/run-renderer';
 import {
@@ -1035,26 +1034,10 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
   if (globalFlag) {
     // Write to global preferences
     const newModel = isReset ? undefined : effectiveInput;
-    await withConfigFileLock(ctx.controls.configPath, async () => {
-      const root = await loadRootConfig(ctx.controls.configPath);
-      if (!root) {
-        ctx.controls.cfg.preferences = { ...(ctx.controls.cfg.preferences ?? {}), model: newModel };
-        await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
-        return;
-      }
-      const profile = root.profiles[ctx.controls.profile];
-      if (!profile) throw new Error(`profile not found: ${ctx.controls.profile}`);
-      root.profiles[ctx.controls.profile] = {
-        ...profile,
-        preferences: { ...(profile.preferences ?? {}), model: newModel },
-      };
-      await saveRootConfig(root, ctx.controls.configPath);
-    });
-    ctx.controls.cfg.preferences = { ...(ctx.controls.cfg.preferences ?? {}), model: newModel };
-    ctx.controls.profileConfig = {
-      ...ctx.controls.profileConfig,
-      preferences: { ...ctx.controls.profileConfig.preferences, model: newModel },
-    };
+    await saveProfileConfig(ctx, (profile) => ({
+      ...profile,
+      preferences: { ...profile.preferences, model: newModel },
+    }));
     await reply(
       ctx,
       newModel
@@ -2293,44 +2276,18 @@ async function saveAccessConfig(
   mutate: (access: ProfileAccess) => ProfileAccess,
 ): Promise<ProfileAccess> {
   try {
-    return await withConfigFileLock(ctx.controls.configPath, async () => {
-      const root = await loadRootConfig(ctx.controls.configPath);
-      if (!root) {
-        const access = mutate(ctx.controls.profileConfig.access);
-        ctx.controls.profileConfig = {
-          ...ctx.controls.profileConfig,
-          access,
-        };
-        ctx.controls.cfg.preferences = {
-          ...(ctx.controls.cfg.preferences ?? {}),
-          access: {
-            allowedUsers: access.allowedUsers,
-            allowedChats: access.allowedChats,
-            admins: access.admins,
-          },
-          requireMentionInGroup: access.requireMentionInGroup,
-        };
-        await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
-        return access;
-      }
-
-      const profile = root.profiles[ctx.controls.profile];
-      if (!profile) throw new Error(`profile not found: ${ctx.controls.profile}`);
-      const access = mutate(profile.access);
-      root.profiles[ctx.controls.profile] = {
-        ...profile,
-        access,
-      };
-      await saveRootConfig(root, ctx.controls.configPath);
-      ctx.controls.profileConfig = root.profiles[ctx.controls.profile]!;
-      ctx.controls.cfg = runtimeProfileConfig(root, ctx.controls.profile);
-      log.info('command', 'access-mutated', {
-        allowedUsers: access.allowedUsers.length,
-        allowedChats: access.allowedChats.length,
-        admins: access.admins.length,
-      });
-      return access;
+    let access: ProfileAccess | undefined;
+    await saveProfileConfig(ctx, (profile) => {
+      access = mutate(profile.access);
+      return { ...profile, access };
     });
+    if (!access) throw new Error('access mutation produced no result');
+    log.info('command', 'access-mutated', {
+      allowedUsers: access.allowedUsers.length,
+      allowedChats: access.allowedChats.length,
+      admins: access.admins.length,
+    });
+    return access;
   } catch (err) {
     reportMetric('command_fail', 1, { step: 'access.save' });
     throw err;
@@ -2726,6 +2683,38 @@ function commandProfilePaths(ctx: CommandContext) {
   });
 }
 
+/**
+ * Mutate the active profile and persist it in the v2 root layout.
+ *
+ * Never hand `ctx.controls.configPath` to the legacy flat `saveConfig()`: it
+ * serializes a profile config verbatim, dropping the `{activeProfile,
+ * profiles}` wrapper. `isRootConfig()` then rejects the file, `loadRootConfig()`
+ * returns `undefined`, and the next start boots an empty default profile —
+ * silently clearing the whitelist, admins and settings. Every settings command
+ * must go through here so the root layout is preserved (and healed when found
+ * damaged).
+ *
+ * `opts.secrets` replaces the root-level secrets block, mirroring what
+ * `/account` does with freshly encrypted credentials.
+ */
+async function saveProfileConfig(
+  ctx: CommandContext,
+  mutate: (profile: ProfileConfig, root: RootConfig) => ProfileConfig | void,
+  opts: { secrets?: RootConfig['secrets'] } = {},
+): Promise<void> {
+  const root = await updateProfileInRootConfig(
+    {
+      configPath: ctx.controls.configPath,
+      profile: ctx.controls.profile,
+      fallback: ctx.controls.profileConfig,
+      secrets: opts.secrets,
+    },
+    mutate,
+  );
+  ctx.controls.profileConfig = root.profiles[ctx.controls.profile]!;
+  ctx.controls.cfg = runtimeProfileConfig(root, ctx.controls.profile);
+}
+
 async function applyConfigLarkCliIdentityPolicy(
   ctx: CommandContext,
   larkCliIdentity: ProfileConfig['larkCli']['identityPreset'],
@@ -2755,23 +2744,11 @@ async function saveAccountConfig(
   const appPaths = commandProfilePaths(ctx);
   await setSecret(secretKeyForApp(newCfg.accounts.app.id), plaintextSecret, appPaths);
 
-  const root = await loadRootConfig(ctx.controls.configPath);
-  if (!root) {
-    await saveConfig(newCfg, ctx.controls.configPath);
-    ctx.controls.cfg = newCfg;
-    return;
-  }
-
-  const profile = root.profiles[ctx.controls.profile];
-  if (!profile) throw new Error(`profile not found: ${ctx.controls.profile}`);
-  root.profiles[ctx.controls.profile] = {
-    ...profile,
-    accounts: newCfg.accounts,
-  };
-  if (newCfg.secrets) root.secrets = newCfg.secrets;
-  await saveRootConfig(root, ctx.controls.configPath);
-  ctx.controls.profileConfig = root.profiles[ctx.controls.profile]!;
-  ctx.controls.cfg = runtimeProfileConfig(root, ctx.controls.profile);
+  await saveProfileConfig(
+    ctx,
+    (profile) => ({ ...profile, accounts: newCfg.accounts }),
+    newCfg.secrets ? { secrets: newCfg.secrets } : {},
+  );
 }
 
 async function savePreferencesConfig(
@@ -2791,20 +2768,11 @@ async function savePreferencesConfig(
       reason: larkCliIdentity === 'user-default' ? 'manual-user-default' : 'manual-bot-only',
     },
   };
-  await withConfigFileLock(ctx.controls.configPath, async () => {
-    const root = await loadRootConfig(ctx.controls.configPath);
-    if (!root) {
-      ctx.controls.cfg.preferences = preferences;
-      ctx.controls.profileConfig.larkCli = larkCli;
-      ctx.controls.profileConfig.mode = mode;
-      await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
-      return;
-    }
-
-    const profile = root.profiles[ctx.controls.profile];
-    if (!profile) throw new Error(`profile not found: ${ctx.controls.profile}`);
+  await saveProfileConfig(ctx, (profile) => {
+    // `access` / `requireMentionInGroup` belong to the profile's access block
+    // in v2, not to preferences.
     const { requireMentionInGroup: _requireMention, access: _access, ...profilePreferences } = preferences;
-    root.profiles[ctx.controls.profile] = {
+    return {
       ...profile,
       mode,
       preferences: {
@@ -2817,9 +2785,6 @@ async function savePreferencesConfig(
       },
       larkCli,
     };
-    await saveRootConfig(root, ctx.controls.configPath);
-    ctx.controls.profileConfig = root.profiles[ctx.controls.profile]!;
-    ctx.controls.cfg = runtimeProfileConfig(root, ctx.controls.profile);
   });
 }
 
@@ -2872,16 +2837,20 @@ async function handleAtBot(args: string, ctx: CommandContext): Promise<void> {
   if (sub === 'reset') {
     delete overrides[chatId];
     const globalVal = getRequireMentionInGroup(ctx.controls.cfg);
-    ctx.controls.cfg.preferences = { ...prefs, chatMentionOverrides: overrides };
-    await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
+    await saveProfileConfig(ctx, (profile) => ({
+      ...profile,
+      preferences: { ...profile.preferences, chatMentionOverrides: overrides },
+    }));
     await reply(ctx, `已移除本群覆盖，恢复全局设置（${globalVal ? '需要 @bot' : '无需 @bot'}）。`);
     return;
   }
 
   const newVal = sub === 'on';
   overrides[chatId] = newVal;
-  ctx.controls.cfg.preferences = { ...prefs, chatMentionOverrides: overrides };
-  await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
+  await saveProfileConfig(ctx, (profile) => ({
+    ...profile,
+    preferences: { ...profile.preferences, chatMentionOverrides: overrides },
+  }));
   await reply(
     ctx,
     newVal

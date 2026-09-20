@@ -1,5 +1,102 @@
 # 更新日志
 
+## v0.7.0-beta.1（2026-09-20）
+
+> **Beta**：决策网关（Decision Gateway）首个版本。**默认关闭**，需在 profile 的
+> `preferences.decisionGateway` 中显式开启；未配置时所有代码路径与 v0.6.3 完全一致。
+
+### 新增
+
+- **决策网关（Decision Gateway）** — 在 agent 运行链路的**两端**各加一道「闭合集合判定」，
+  把「决策」和「生成」拆开：agent 负责生成，网关负责判定。网关不产生任何自由文本，
+  只返回**受限选项 + 置信度**，因此输出可校验、可阈值化、可回滚。
+
+  两个能力：
+
+  1. **模型路由**（运行前）— 根据 prompt 复杂度从配置的档位阶梯中选一个模型，
+     取代「一个 profile 静态绑定一个模型」。落点在 `run-flow` 的模型解析处，
+     优先级为：**会话级 `/model` 覆盖 > 网关路由 > profile 配置 > agent 默认**。
+     profile 里显式 pin 的模型**永远不会**被路由改写。
+  2. **出站护栏**（投递前）— 回复发往飞书前的最后一道检查，识别凭证、密码、
+     内网地址、本机路径四类泄漏。落点是 `sendFinalReply`，覆盖 card / markdown /
+     text 三种渲染模式。
+
+- **配置结构**（`preferences.decisionGateway`）：
+
+  ```json
+  {
+    "decisionGateway": {
+      "mode": "dry-run",
+      "model": "fast-model-id",
+      "threshold": 0.7,
+      "timeoutMs": 3000,
+      "modelRoute": {
+        "tiers": [
+          { "label": "轻量", "model": "claude-haiku-4-5", "hint": "单点查询、格式转换、简单改写" },
+          { "label": "标准", "model": "claude-sonnet-5", "hint": "常规实现、多文件改动、分析调试" },
+          { "label": "重度", "model": "claude-opus-4-8", "hint": "架构决策、长链路推理、疑难诊断" }
+        ]
+      },
+      "outboundGuard": {
+        "action": "log",
+        "categories": ["api-key", "password", "internal-host", "private-path"],
+        "minChars": 40
+      }
+    }
+  }
+  ```
+
+  - `mode`：`off`（默认）/ `dry-run`（判定并记录，但不改变任何行为）/ `active`（应用判定）。
+  - `model` 与 `baseUrl` / `apiKey` **默认复用 `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`**，
+    即与 agent 走同一个内网出口 —— 不引入新的供应商、新的凭证、新的数据出境路径。
+  - `outboundGuard.action`：`log`（仅记录并在回复末尾追加一行提示）/ `block`（拦截该条回复）。
+    `dry-run` 模式下始终等同 `log`，不会拦截。
+
+### 设计约束（三条不可越过的红线）
+
+1. **失败即降级**：网关任何异常（超时、非 200、答案不在选项内、模型不存在）
+   都退化为「未决策」，主链路按原逻辑继续。**它没有任何能力阻断一次运行。**
+2. **只收紧，不放开**：网关不能授予权限、不能放宽沙箱、不能绕过白名单。
+   确定性规则始终是下限，网关最多是在其之上再加一层。
+3. **`dry-run` 先行**：档位阶梯应在真实流量上以 `dry-run` 观察准确率与耗时，
+   再切 `active`。判定耗时直接叠加在用户等待上，默认超时 3 秒。
+
+### 实测（2026-09-20，本机 → 内网 modelproxy）
+
+在真实网关上跑过 6 个场景（路由 ×2、不确定边界 ×1、出站检查 ×3）：
+
+| 模型 | 判定 | 单次延迟 |
+|---|---|---|
+| `deepseek-flash` | **6/6 语义正确**（1 例回抄了选项注释，由解析器兜底）— **推荐** | 1.5–1.7s |
+| `claude-sonnet-5` | 256 tokens 下 6/6；64 tokens 下 4/6（2 例截断） | 1.6–4.2s |
+| `glm-5.3-flash` | 5/6 — 泄漏场景返回空串即**漏报**，**不推荐** | 1.4–3.9s |
+
+两个默认值是由这次实测定死的，不是拍的：
+
+- **输出预算 256 tokens**。64 tokens 时推理型模型会在吐出 JSON 前耗尽预算，
+  截断结果解析成「未决策」——在出站护栏上这是**漏报**，是唯一一种看起来像成功的失败。
+- **选项匹配容忍回抄**。模型常把 `- light — 单点查询…` 整行抄回来作为答案，
+  严格比对会让路由几乎每次都 abstain（它判对了，我们却扔掉了）。现在接受前置匹配，
+  且当两个档位互为前缀时（`light` / `light-plus`）取更具体的那个。
+
+⚠️ 即便最快的模型也要约 1.5 秒，而**模型路由这段时间直接叠加在用户等待上**——
+只有「标准 → 轻量」的差价大于这个等待成本时才值得开。**出站护栏不受此限**：
+它跑在 run 结束之后，用户此时已经等了整个 run，1.5 秒不可感知。
+
+### 说明
+
+- 新增 `src/decision/`（types / config / provider / gateway / integrate）与
+  `tests/unit/decision/` 共 59 个用例。
+- 配置写入路径 `normalizePreferences()` 已由测试锁定：`decisionGateway` 块可完整往返，
+  且不干扰其它 preference 字段；老 profile 不含该字段时行为不变。
+
+### 刻意未做
+
+- **准入判定**（`policy/access.ts`）保持确定性白名单：该处输入是 open_id 集合成员判定，
+  规则 100% 准确、可审计、零成本，换成概率模型是净负收益。
+- **附件校验**（`media/attachment.ts`）仍按 kind / size / mime 判定，确定性足够。
+- **群消息「该不该理」判定**与**prompt 前置风险重打分**未接入主链路，留待后续版本。
+
 ## v0.6.3（2026-09-10）
 
 ### 修复

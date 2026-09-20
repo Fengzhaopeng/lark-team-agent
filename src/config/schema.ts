@@ -1,3 +1,5 @@
+import type { DecisionGatewayPreference } from '../decision/config';
+
 export type TenantBrand = 'feishu' | 'lark';
 
 /**
@@ -111,6 +113,20 @@ export interface AppPreferences {
    * CLI / account default applies. Default: unset.
    */
   model?: string;
+  /**
+   * Decision Gateway — an optional decision layer around each run. When
+   * present, the bridge may ask a cheap classifier two closed-set questions:
+   * which model tier this prompt deserves, and whether a finished reply is
+   * safe to publish into the chat.
+   *
+   * Absent (the default) means the feature is off and every code path behaves
+   * as it did before. `mode: 'dry-run'` decides and logs without changing
+   * anything, which is how the tier table should be tuned before `'active'`.
+   *
+   * Re-validated at read time — see `src/decision/config.ts`. Failures always
+   * fall back to the original behaviour, never block a run.
+   */
+  decisionGateway?: DecisionGatewayPreference;
   /**
    * Whether to send a separate Lark COT process message before the final
    * answer. `brief` mirrors the lightweight tool/progress visibility from

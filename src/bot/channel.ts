@@ -31,7 +31,8 @@ import {
 import { renderText } from '../card/text-renderer';
 import { tryHandleCommand, type Controls } from '../commands';
 import type { AppConfig } from '../config/schema';
-import { isUserAuthModeActive } from '../config/profile-schema';
+import { isUserAuthModeActive, type ProfileConfig } from '../config/profile-schema';
+import { scanOutboundReply } from '../decision/integrate';
 import {
   getAgentStopGraceMs,
   getCotMessages,
@@ -1239,6 +1240,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           sendOpts,
           cardRenderOptions,
           userAuthTrigger,
+          preferences: controls.profileConfig.preferences,
         });
         return;
       }
@@ -1310,6 +1312,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           sendOpts,
           cardRenderOptions,
           userAuthTrigger,
+          preferences: controls.profileConfig.preferences,
         });
       }
     } else if (replyMode === 'markdown') {
@@ -1370,6 +1373,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           sendOpts,
           cardRenderOptions,
           userAuthTrigger,
+          preferences: controls.profileConfig.preferences,
         });
       }
     } else {
@@ -1396,6 +1400,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         sendOpts,
         cardRenderOptions,
         userAuthTrigger,
+        preferences: controls.profileConfig.preferences,
       });
     }
   } catch (err) {
@@ -1446,6 +1451,13 @@ export async function sendFinalReply(input: {
   sendOpts: { replyTo: string; replyInThread?: boolean };
   cardRenderOptions: { signCallback?: (action: string) => string };
   /**
+   * Profile preferences, read only by the Decision Gateway's outbound guard.
+   * Optional so callers without profile context (and tests) can omit it — the
+   * guard then never runs, which is also the behaviour when the profile has
+   * no `decisionGateway` block.
+   */
+  preferences?: ProfileConfig['preferences'];
+  /**
    * On-demand personal-identity auth (group chats only): when set and the
    * agent's entire reply is exactly `NEED_USER_AUTH_SENTINEL`, suppress it
    * and trigger the real OAuth flow instead of showing the sentinel to the
@@ -1491,33 +1503,82 @@ export async function sendFinalReply(input: {
     return;
   }
 
+  // Decision Gateway: last check before the reply leaves for Feishu. The
+  // verdict is rendered back into a `RunState` rather than into a string, so
+  // the card and markdown paths agree on what the user ends up seeing. The
+  // guard never edits the agent's text in place — it either appends a notice
+  // or replaces the whole reply with one.
+  const guard = await scanOutboundReply({
+    text: body,
+    preferences: input.preferences ?? {},
+    scopeId: input.scope,
+    replyMode: input.replyMode,
+  });
+  const state =
+    guard.blocked && guard.notice
+      ? noticeState(guard.notice)
+      : guard.flagged && guard.notice
+        ? appendNotice(input.state, guard.notice)
+        : input.state;
+  const outboundBody = guard.flagged ? renderText(state) : body;
+
   if (input.replyMode === 'card') {
     const result = await input.channel.send(
       input.chatId,
-      { card: renderCard(input.state, input.cardRenderOptions) },
+      { card: renderCard(state, input.cardRenderOptions) },
       input.sendOpts,
     );
     requireMessageReceipt(result, 'card');
-    log.info('outbound', 'sent', outboundLogFields(input, 'card', body, result));
+    log.info('outbound', 'sent', outboundLogFields(input, 'card', outboundBody, result));
   } else if (input.replyMode === 'markdown') {
-    if (body.trim()) {
+    if (outboundBody.trim()) {
       const result = await input.channel.send(
         input.chatId,
-        { markdown: body },
+        { markdown: outboundBody },
         input.sendOpts,
       );
       requireMessageReceipt(result, 'markdown');
-      log.info('outbound', 'sent', outboundLogFields(input, 'markdown', body, result));
+      log.info('outbound', 'sent', outboundLogFields(input, 'markdown', outboundBody, result));
     }
-  } else if (body.trim()) {
+  } else if (outboundBody.trim()) {
     const result = await input.channel.send(
       input.chatId,
-      { markdown: body },
+      { markdown: outboundBody },
       input.sendOpts,
     );
     requireMessageReceipt(result, 'text');
-    log.info('outbound', 'sent', outboundLogFields(input, 'text', body, result));
+    log.info('outbound', 'sent', outboundLogFields(input, 'text', outboundBody, result));
   }
+}
+
+/**
+ * A `RunState` carrying nothing but a notice — used when the outbound guard
+ * blocks a reply outright. Mirrors `initialState`'s shape so both renderers
+ * (card and plain text) produce the same visible result.
+ */
+function noticeState(notice: string): RunState {
+  return {
+    blocks: [{ kind: 'text', content: notice, streaming: false }],
+    finalText: notice,
+    reasoning: { content: '', active: false },
+    footer: null,
+    terminal: 'done',
+  };
+}
+
+/**
+ * Append a notice to a finished reply.
+ *
+ * `finalText` is updated alongside `blocks` on purpose: `finalAnswerOnlyState`
+ * (used by the CoT path) prefers `finalText` and would otherwise drop the
+ * notice, so the two must stay in sync.
+ */
+function appendNotice(state: RunState, notice: string): RunState {
+  return {
+    ...state,
+    blocks: [...state.blocks, { kind: 'text', content: notice, streaming: false }],
+    ...(state.finalText ? { finalText: `${state.finalText}\n\n${notice}` } : {}),
+  };
 }
 
 /**

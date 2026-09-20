@@ -1,7 +1,7 @@
 import type { AgentCapability } from '../agent/capability';
-import { resolveModelArg } from '../agent/models';
 import type { AgentEvent } from '../agent/types';
 import type { ProfileConfig } from '../config/profile-schema';
+import { resolveRoutedModel } from '../decision/integrate';
 import type { AccessDecision } from '../policy/access';
 import {
   evaluateRunPolicy,
@@ -139,6 +139,23 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
     }
   }
 
+  // Model selection, highest precedence first:
+  //   1. a per-scope `/model` override the user set in this chat;
+  //   2. the Decision Gateway's tier choice — consulted only when the profile
+  //      left `preferences.model` unset, since an explicit pin must win;
+  //   3. the profile's own value, else the agent CLI default.
+  // `resolveRoutedModel` is a no-op unless the profile carries a
+  // `decisionGateway` block, so (2) costs nothing when the feature is off.
+  const scopeModel = input.sessions.getScopeModel(input.scopeId);
+  const model =
+    scopeModel ??
+    (await resolveRoutedModel({
+      agentKind: input.profileConfig.agentKind,
+      preferences: input.profileConfig.preferences,
+      prompt: input.prompt,
+      scopeId: input.scopeId,
+    }));
+
   let execution: RunExecution;
   try {
     execution = await input.executor.submit({
@@ -146,10 +163,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       policy,
       sessionId,
       threadId,
-      model: input.sessions.getScopeModel(input.scopeId) ?? resolveModelArg(
-        input.profileConfig.agentKind,
-        input.profileConfig.preferences.model,
-      ),
+      model,
       images:
         input.capability.agentId === 'codex'
           ? policy.attachments

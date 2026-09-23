@@ -133,11 +133,32 @@ import type { CapabilityCache, ModelCapability } from './model-probe.js';
 
 /**
  * Fallback patterns for filtering out non-chat models when no probe cache
- * is available. These cover the most common embedding / image / video model
- * naming conventions but are NOT exhaustive — use probe cache when possible.
+ * is available. These cover the most common embedding / image / video / audio
+ * model naming conventions but are NOT exhaustive — use probe cache when possible.
+ *
+ * Kept deliberately conservative: a false positive (hiding a real chat model)
+ * is worse than a false negative here, so only names that are unambiguously
+ * not conversational are listed.
  */
 const NON_CHAT_FALLBACK_PATTERNS = [
   /embedding/i,
+  // Image generation
+  /^gpt-image/i,
+  /^imagen-/i,
+  /seedream/i,
+  /-image(-|$)/i,     // gemini-3.1-flash-image, gemini-3-pro-image-preview
+  /^dall-e/i,
+  /^flux/i,
+  // Video generation
+  /seedance/i,
+  // Audio input/output
+  /-tts$/i,
+  /-transcribe$/i,
+  /-realtime/i,
+  /-audio/i,
+  // Non-conversational text endpoints
+  /^text-(ada|babbage|curie|davinci|moderation)/i,
+  /whisper/i,
 ];
 
 /**

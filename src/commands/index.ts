@@ -91,7 +91,7 @@ import { createBoundChat, defaultChatName } from '../bot/group';
 import { fetchKnownChats, type KnownChat } from '../bot/lark-info';
 import { applyLarkCliIdentityPolicy, hasStructuredLarkCliUserAuth } from '../lark-cli/identity-policy';
 import { fetchModels, filterByCapability, filterChatModels, formatFetchModelsError, groupModels } from '../anthropic/models';
-import { loadCapabilityCache, probeAllModels, saveCapabilityCache, type CapabilityCache } from '../anthropic/model-probe';
+import { loadCapabilityCache, probeAllModels, saveCapabilityCache, type CapabilityCache, type ModelCapability } from '../anthropic/model-probe';
 
 export interface Controls {
   profile: string;
@@ -914,7 +914,7 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
   // /model scan — probe all models and cache capabilities
   if (input === 'scan') {
     const cachePath = capabilityCachePath(ctx.controls.configPath, ctx.controls.profile);
-    await reply(ctx, '🔍 正在探测所有模型的实际能力，预计 2-5 分钟…\n（chat 探测快，图像/视频需要实际生成，单模型最长 90s）');
+    await reply(ctx, '🔍 正在探测所有模型的实际能力，预计 3-8 分钟…\n（chat 探测快；工具调用每个模型最多 2 次请求；图像/视频需要实际生成，单模型最长 90s）');
     const listResult = await fetchModels();
     if (!listResult.ok) {
       await reply(ctx, `❌ 获取模型列表失败：${formatFetchModelsError(listResult.error)}`);
@@ -926,18 +926,25 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
       onProgress: (_done, total, _id) => { done = _done; void total; },
     });
     await saveCapabilityCache(cachePath, records);
-    const chat = records.filter((r) => r.capabilities.includes('chat')).length;
-    const img = records.filter((r) => r.capabilities.includes('image-gen')).length;
-    const vid = records.filter((r) => r.capabilities.includes('video-gen')).length;
+    const count = (cap: ModelCapability) => records.filter((r) => r.capabilities.includes(cap)).length;
+    const chat = count('chat');
+    const tool = count('tool-call');
+    const vision = count('vision');
+    const reason = count('reasoning');
+    const img = count('image-gen');
+    const vid = count('video-gen');
     const none = records.filter((r) => r.capabilities.length === 0).length;
     await reply(
       ctx,
       [
         `✅ 探测完成（共 ${records.length} 个模型，各项能力可重叠）`,
         `- 💬 对话（chat）：${chat} 个`,
+        `- 🔧 工具调用（tool-call）：${tool} 个`,
+        `- 👁 图片输入（vision）：${vision} 个`,
+        `- 🧠 思考输出（reasoning）：${reason} 个`,
         `- 🎨 图像生成（/image）：${img} 个`,
         `- 🎬 视频生成（/video）：${vid} 个`,
-        ...(none > 0 ? [`- ❓ 三项均不支持：${none} 个`] : []),
+        ...(none > 0 ? [`- ❓ 无任何能力：${none} 个`] : []),
         '',
         '用 `/model list` 查看对话模型，`/image` 或 `/video` 直接生成媒体。',
       ].join('\n'),
@@ -968,6 +975,14 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
     const chatModels = filterChatModels(result.models, probeCache);
     const chatGroups = groupModels(chatModels);
     lines.push(`**💬 对话模型**（${chatModels.length} 个，可用于 \`/model\` 切换）`);
+    if (probeCache) {
+      const chatIds = new Set(chatModels.map((m) => m.id));
+      const among = (cap: ModelCapability) =>
+        probeCache.models.filter((r) => chatIds.has(r.modelId) && r.capabilities.includes(cap)).length;
+      lines.push(
+        `_能力：🔧 工具调用 ${among('tool-call')} · 👁 图片输入 ${among('vision')} · 🧠 思考 ${among('reasoning')}_`,
+      );
+    }
     for (const group of chatGroups) {
       lines.push(`\n_${group.label}_`);
       for (const m of group.models) {

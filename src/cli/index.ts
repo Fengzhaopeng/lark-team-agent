@@ -42,7 +42,10 @@ program
   .option('--agent <kind>', 'agent kind for a new profile (claude or codex)')
   .option('--workspace <path>', 'initial working directory for first-run profile bootstrap')
   .option('--app-id <id>', 'use an existing Lark/Feishu app instead of QR app creation')
-  .option('--app-secret <secret>', 'App Secret for --app-id; prefer interactive input on shared machines')
+  .option(
+    '--app-secret <secret>',
+    'App Secret for --app-id; falls back to $LARK_APP_SECRET, else interactive input (prefer those on shared machines)',
+  )
   .option('--tenant <tenant>', 'tenant for --app-id (feishu or lark; default feishu)')
   .option('--skip-check-lark-cli', 'skip lark-cli pre-flight check (auto-install + bind)')
   .action(async (opts: {
@@ -85,7 +88,10 @@ profile
   .option('--agent <kind>', 'agent kind (claude or codex)')
   .option('--workspace <path>', 'initial working directory for this profile')
   .option('--app-id <id>', 'use an existing Lark/Feishu app instead of QR app creation')
-  .option('--app-secret <secret>', 'App Secret for --app-id; prefer interactive input on shared machines')
+  .option(
+    '--app-secret <secret>',
+    'App Secret for --app-id; falls back to $LARK_APP_SECRET, else interactive input (prefer those on shared machines)',
+  )
   .option('--tenant <tenant>', 'tenant for --app-id (feishu or lark; default feishu)')
   .action(async (name: string, opts: {
     agent?: string;
@@ -157,7 +163,10 @@ program
   .option('--agent <kind>', 'agent kind for first-run profile bootstrap (claude or codex)')
   .option('--workspace <path>', 'initial working directory for first-run profile bootstrap')
   .option('--app-id <id>', 'use an existing Lark/Feishu app instead of QR app creation')
-  .option('--app-secret <secret>', 'App Secret for --app-id; prefer interactive input on shared machines')
+  .option(
+    '--app-secret <secret>',
+    'App Secret for --app-id; falls back to $LARK_APP_SECRET, else interactive input (prefer those on shared machines)',
+  )
   .option('--tenant <tenant>', 'tenant for --app-id (feishu or lark; default feishu)')
   .option('--skip-check-lark-cli', 'skip lark-cli pre-flight check (auto-install + bind)')
   .action(async (opts: {

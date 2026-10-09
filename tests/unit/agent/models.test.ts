@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_MODEL,
   isDefaultModel,
+  isForeignAgentModel,
   modelLabel,
   normalizeModelSelection,
+  pickerOptions,
   resolveModelArg,
   supportedModels,
 } from '../../../src/agent/models.js';
@@ -38,11 +40,30 @@ describe('agent model catalog', () => {
     expect(isDefaultModel('claude-opus-4-8')).toBe(false);
   });
 
-  it('coerces unknown / cross-agent selections back to the default option', () => {
+  it('coerces cross-agent selections back to the default option', () => {
     expect(normalizeModelSelection('claude', 'claude-opus-4-8')).toBe('claude-opus-4-8');
     // A Codex model left over after switching a profile to Claude is invalid.
     expect(normalizeModelSelection('claude', 'gpt-5.3-codex')).toBe(DEFAULT_MODEL);
     expect(normalizeModelSelection('claude', undefined)).toBe(DEFAULT_MODEL);
+  });
+
+  it('honors any non-empty value the gateway can serve, not just the shortlist', () => {
+    // The catalogs above are a shortlist; the gateway (161 ids) is the
+    // authority. Rewriting these to "default" is what used to make
+    // `/model --global <id>` report success while running something else.
+    expect(normalizeModelSelection('claude', 'gpt-5.6-terra')).toBe('gpt-5.6-terra');
+    expect(normalizeModelSelection('claude', 'deepseek-v4-flash')).toBe('deepseek-v4-flash');
+    expect(resolveModelArg('claude', 'gpt-5.6-terra')).toBe('gpt-5.6-terra');
+    // Trimmed, so a stray space from a chat message is harmless.
+    expect(resolveModelArg('claude', ' gpt-5.6-terra ')).toBe('gpt-5.6-terra');
+  });
+
+  it('flags values that belong to the other agent kind', () => {
+    expect(isForeignAgentModel('claude', 'gpt-5.3-codex')).toBe(true);
+    expect(isForeignAgentModel('codex', 'claude-opus-5')).toBe(true);
+    expect(isForeignAgentModel('claude', 'claude-opus-5')).toBe(false);
+    expect(isForeignAgentModel('claude', 'gpt-5.6-terra')).toBe(false);
+    expect(isForeignAgentModel('claude', undefined)).toBe(false);
   });
 
   it('resolves the --model argument, omitting it for the default', () => {
@@ -56,5 +77,22 @@ describe('agent model catalog', () => {
   it('labels a stored value using the picker option text', () => {
     expect(modelLabel('claude', 'claude-opus-4-8')).toBe('Opus 4.8');
     expect(modelLabel('claude', DEFAULT_MODEL)).toContain('跟随默认');
+    // Off-catalog values show their real id instead of masquerading as default.
+    expect(modelLabel('claude', 'gpt-5.6-terra')).toBe('gpt-5.6-terra');
+    expect(modelLabel('claude', 'gpt-5.3-codex')).toContain('跟随默认');
+  });
+
+  it('offers a synthetic picker entry for an off-catalog current value', () => {
+    // Feishu's select_static rejects an initial_option that is not an option
+    // value, so the current selection must always be present in the list.
+    const plain = pickerOptions('claude', 'claude-opus-5');
+    expect(plain.map((m) => m.value)).toEqual(supportedModels('claude').map((m) => m.value));
+
+    const custom = pickerOptions('claude', 'gpt-5.6-terra');
+    expect(custom).toHaveLength(plain.length + 1);
+    expect(custom.at(-1)).toEqual({
+      value: 'gpt-5.6-terra',
+      label: '当前设置：gpt-5.6-terra',
+    });
   });
 });

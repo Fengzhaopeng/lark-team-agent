@@ -917,6 +917,23 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
   // render loop will mark the card as interrupted and re-render.
 }
 
+/**
+ * Non-blocking sanity note for `/model <id>`: mention it when the gateway's own
+ * inventory does not list the id. "Listed in /v1/models" does not guarantee a
+ * channel exists, but *not* listed usually means there is none — worth saying,
+ * never worth refusing over (the id may still be servable).
+ */
+async function unknownModelNote(value: string | undefined): Promise<string> {
+  if (!value) return '';
+  const result = await fetchModels();
+  if (!result.ok) return '';
+  if (result.models.some((m) => m.id === value)) return '';
+  return (
+    `\n⚠️ 当前网关 \`/v1/models\` 里没有 \`${value}\`；若它确实无通道，调用会直接失败。` +
+    '\n（`/model list` 看网关清单，`/model scan` 实测能力）'
+  );
+}
+
 async function handleModel(args: string, ctx: CommandContext): Promise<void> {
   const input = args.trim();
 
@@ -1107,7 +1124,7 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
     await reply(
       ctx,
       newModel
-        ? `✓ 全局默认模型已设为 \`${newModel}\`，对无覆盖的会话立即生效。`
+        ? `✓ 全局默认模型已设为 \`${newModel}\`，对无覆盖的会话立即生效。${await unknownModelNote(newModel)}`
         : '✓ 已清除全局模型设置，恢复环境变量默认。',
     );
     return;
@@ -1127,7 +1144,10 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
   }
 
   ctx.sessions.setScopeModel(ctx.scope, effectiveInput);
-  await reply(ctx, `✓ 本会话模型已切换为 \`${effectiveInput}\`，下次对话立即生效。`);
+  await reply(
+    ctx,
+    `✓ 本会话模型已切换为 \`${effectiveInput}\`，下次对话立即生效。${await unknownModelNote(effectiveInput)}`,
+  );
 }
 
 // ── Media generation (/image, /video) ──────────────────────────────────────

@@ -69,25 +69,48 @@ export function isDefaultModel(value: string | undefined): boolean {
 }
 
 /**
- * Coerce a stored model preference into a value guaranteed to be one of the
- * current agent's picker options — Feishu's `select_static` requires
- * `initial_option` to match an option value exactly. Unknown / cross-agent
- * values (e.g. a Claude alias left over after switching a profile to Codex)
- * fall back to {@link DEFAULT_MODEL}.
+ * True when `value` names a model that only the *other* agent kind can run
+ * (e.g. a Codex id left on a Claude profile after switching `agentKind`).
+ * These are the one class of value that must still be dropped: neither CLI can
+ * execute the other's ids, so forwarding one guarantees a failed run.
+ */
+export function isForeignAgentModel(
+  agentKind: AgentKind,
+  value: string | undefined,
+): boolean {
+  const trimmed = (value ?? '').trim();
+  if (isDefaultModel(trimmed)) return false;
+  if (supportedModels(agentKind).some((m) => m.value === trimmed)) return false;
+  const other: AgentKind = agentKind === 'codex' ? 'claude' : 'codex';
+  return supportedModels(other).some((m) => m.value === trimmed);
+}
+
+/**
+ * Resolve a stored model preference into the value the profile will actually
+ * run.
+ *
+ * The picker catalogs below are a **shortlist, not an allow-list**. The gateway
+ * is the authority (161 ids on the Unipus gateways) and `/model <id>` has always
+ * let the session scope carry any of them — so the profile-level preference
+ * honors any non-empty value too. Silently rewriting an unrecognised value to
+ * "default" used to make `/model --global <id>` report success while the run
+ * quietly used a different model.
+ *
+ * Only {@link isForeignAgentModel} values fall back to the default.
  */
 export function normalizeModelSelection(
   agentKind: AgentKind,
   value: string | undefined,
 ): string {
-  if (isDefaultModel(value)) return DEFAULT_MODEL;
-  return supportedModels(agentKind).some((m) => m.value === value)
-    ? (value as string)
-    : DEFAULT_MODEL;
+  const trimmed = (value ?? '').trim();
+  if (isDefaultModel(trimmed)) return DEFAULT_MODEL;
+  if (isForeignAgentModel(agentKind, trimmed)) return DEFAULT_MODEL;
+  return trimmed;
 }
 
 /**
  * Resolve the concrete model string to hand the agent, or `undefined` to omit
- * the `--model` flag. Cross-agent / unknown values are treated as "default".
+ * the `--model` flag.
  */
 export function resolveModelArg(
   agentKind: AgentKind,
@@ -100,5 +123,21 @@ export function resolveModelArg(
 /** Picker label for a stored value, for display in the saved-config card. */
 export function modelLabel(agentKind: AgentKind, value: string | undefined): string {
   const normalized = normalizeModelSelection(agentKind, value);
-  return supportedModels(agentKind).find((m) => m.value === normalized)?.label ?? normalized;
+  const known = supportedModels(agentKind).find((m) => m.value === normalized);
+  return known?.label ?? normalized;
+}
+
+/**
+ * Options for the `/config` model dropdown.
+ *
+ * Feishu's `select_static` requires `initial_option` to match one of the option
+ * values exactly. A stored value outside the shortlist therefore gets a
+ * synthetic entry rather than being shown as "跟随默认" while the profile
+ * actually runs something else.
+ */
+export function pickerOptions(agentKind: AgentKind, current: string | undefined): ModelOption[] {
+  const options = supportedModels(agentKind);
+  const normalized = normalizeModelSelection(agentKind, current);
+  if (options.some((m) => m.value === normalized)) return options;
+  return [...options, { value: normalized, label: `当前设置：${normalized}` }];
 }

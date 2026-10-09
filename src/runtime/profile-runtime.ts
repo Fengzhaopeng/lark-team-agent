@@ -437,12 +437,17 @@ async function resolveBootstrapAppConfig(opts: ResolveProfileRuntimeOptions): Pr
     }
     return runRegistrationWizard();
   }
-  let appSecret = opts.appSecret;
+  // Prefer the flag, then `LARK_APP_SECRET`. The env fallback exists so
+  // containerised installs don't have to put the secret on the command line:
+  // `ps` inside the container (and `docker inspect`) shows argv to anyone with
+  // docker access, while the environment is only visible to the process owner.
+  let appSecret = opts.appSecret ?? (process.env['LARK_APP_SECRET']?.trim() || undefined);
   if (!appSecret) {
     if (!isInteractiveTerminal()) {
       throw new Error(
         `非交互模式缺少 App Secret: ${opts.appId}。` +
-          '请传入 --app-secret <secret>，或在终端中重新运行命令后按提示输入。',
+          '请设置 LARK_APP_SECRET 环境变量、传入 --app-secret <secret>，' +
+          '或在终端中重新运行命令后按提示输入。',
       );
     }
     appSecret = await promptPassword(`输入 ${opts.appId} 的 App Secret: `);

@@ -1,4 +1,4 @@
-import { modelLabel, supportedModels } from '../agent/models';
+import { modelLabel, pickerOptions } from '../agent/models';
 import type { KnownChat } from '../bot/lark-info';
 import type { AgentKind, LarkCliIdentityPreset, ProfileMode } from '../config/profile-schema';
 import type { CotMessagesMode, MessageReplyMode } from '../config/schema';
@@ -165,7 +165,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
               tag: 'select_static',
               name: 'model',
               initial_option: opts.model,
-              options: supportedModels(opts.agentKind).map((m) => ({
+              options: pickerOptions(opts.agentKind, opts.model).map((m) => ({
                 text: { tag: 'plain_text', content: m.label },
                 value: m.value,
               })),

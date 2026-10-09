@@ -15,8 +15,20 @@ describe('agent model catalog', () => {
     expect(claude[0]?.value).toBe(DEFAULT_MODEL);
     expect(codex[0]?.value).toBe(DEFAULT_MODEL);
     expect(claude.map((m) => m.value)).toContain('claude-opus-4-8');
-    expect(codex.map((m) => m.value)).toContain('gpt-5-codex');
-    expect(claude.map((m) => m.value)).not.toContain('gpt-5-codex');
+    expect(codex.map((m) => m.value)).toContain('gpt-5.3-codex');
+    expect(claude.map((m) => m.value)).not.toContain('gpt-5.3-codex');
+  });
+
+  it('never lists ids the gateway has no channel for', () => {
+    // 2026-10-09: all of these returned 503 `No available channel` on both
+    // gateways, across every pooled key. Listing them makes the picker hand
+    // users a model that fails on every run.
+    const claude = supportedModels('claude').map((m) => m.value);
+    const codex = supportedModels('codex').map((m) => m.value);
+    expect(claude).not.toContain('claude-haiku-4-5');
+    expect(claude).not.toContain('opusplan');
+    expect(codex).not.toContain('gpt-5-codex');
+    expect(codex).not.toContain('o3');
   });
 
   it('treats unset and the default sentinel as "use agent default"', () => {
@@ -29,7 +41,7 @@ describe('agent model catalog', () => {
   it('coerces unknown / cross-agent selections back to the default option', () => {
     expect(normalizeModelSelection('claude', 'claude-opus-4-8')).toBe('claude-opus-4-8');
     // A Codex model left over after switching a profile to Claude is invalid.
-    expect(normalizeModelSelection('claude', 'gpt-5-codex')).toBe(DEFAULT_MODEL);
+    expect(normalizeModelSelection('claude', 'gpt-5.3-codex')).toBe(DEFAULT_MODEL);
     expect(normalizeModelSelection('claude', undefined)).toBe(DEFAULT_MODEL);
   });
 

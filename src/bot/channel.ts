@@ -957,6 +957,19 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const modelPref = controls.profileConfig.preferences.model;
   const modelSelection = normalizeModelSelection(agentKind, modelPref);
   const requestedModel = resolveModelArg(agentKind, modelPref);
+  // A global preference that isn't in the hardcoded picker catalog is dropped
+  // here and the run silently falls back to `ANTHROPIC_MODEL`. `/model --global
+  // <name>` accepts any string, so this is reachable without the value ever
+  // being validated — say so instead of failing quietly. (The per-scope
+  // override set by `/model <name>` is NOT gated by the catalog, so it can
+  // legitimately carry ids this warning would otherwise cover.)
+  if (modelPref && modelPref !== modelSelection) {
+    console.warn(
+      `⚠ [model.pref-dropped] profile=${controls.profile} value=${modelPref} ` +
+        '不在内置模型清单，已回退默认（不传 --model）。若该模型确实可用，' +
+        '用 `/model --global <name>` 之外的方式确认，或把它加进 src/agent/models.ts。',
+    );
+  }
   const prevModel = lastRunModelByScope.get(scope);
   const modelSwitched = prevModel !== undefined && prevModel !== modelSelection;
   lastRunModelByScope.set(scope, modelSelection);

@@ -21,24 +21,41 @@ export interface ModelOption {
 /**
  * Claude Code models. Pinned to concrete version ids (Claude Code's `--model`
  * accepts the full model-id string, not just the `opus`/`sonnet` aliases) so
- * the picker names an exact model. Add new ids here when a generation ships;
- * `opusplan` is kept as the one alias with no versioned equivalent (it runs
- * Opus for planning and Sonnet for execution).
+ * the picker names an exact model.
+ *
+ * 🔴 Adding an id requires TWO checks (both done live, 2026-10-09, Claude Code
+ * 2.1.278):
+ *   1. the gateway serves it — listed in `/v1/models` is not enough, a
+ *      channelless id 503s on every run;
+ *   2. the CLI's own catalog knows it — an unknown id still runs, but the CLI
+ *      warns `[claude-code:unrecognized_model]` and assumes a 200k context
+ *      window for auto-compact.
+ *
+ * Removed 2026-10-09 (503 `No available channel`, both gateways, every pooled
+ * key): `claude-haiku-4-5` (and `-20251001`), `opusplan`.
+ * Deliberately not offered: `claude-opus-5-5` / `claude-sonnet-5-5` — the
+ * gateway serves both, but 2.1.278's catalog does not know them (check 2).
  */
 const CLAUDE_MODELS: ModelOption[] = [
   { value: DEFAULT_MODEL, label: '跟随默认（不指定）' },
-  { value: 'claude-opus-4-8', label: 'Opus 4.8' },
+  { value: 'claude-opus-5', label: 'Opus 5' },
   { value: 'claude-sonnet-5', label: 'Sonnet 5' },
-  { value: 'claude-haiku-4-5', label: 'Haiku 4.5' },
-  { value: 'opusplan', label: 'Opus Plan（规划用 Opus，执行用 Sonnet）' },
+  { value: 'claude-opus-4-8', label: 'Opus 4.8' },
 ];
 
-/** Codex CLI models. Forwarded to `codex exec --model`. */
+/**
+ * Codex CLI models. Forwarded to `codex exec --model`.
+ *
+ * Same rule as {@link CLAUDE_MODELS}: only gateway-served ids. Removed
+ * 2026-10-09 (503 `No available channel`): `gpt-5-codex`, `o3` (no o-series on
+ * either gateway at all). `gpt-5.1-codex` / `gpt-5.3-codex` were verified
+ * available the same day — note both currently resolve to `gpt-6-luna`.
+ */
 const CODEX_MODELS: ModelOption[] = [
   { value: DEFAULT_MODEL, label: '跟随默认（不指定）' },
-  { value: 'gpt-5-codex', label: 'GPT-5 Codex' },
+  { value: 'gpt-5.3-codex', label: 'GPT-5.3 Codex' },
+  { value: 'gpt-5.1-codex', label: 'GPT-5.1 Codex' },
   { value: 'gpt-5', label: 'GPT-5' },
-  { value: 'o3', label: 'o3' },
 ];
 
 /** The model picker options for a profile's agent kind. */

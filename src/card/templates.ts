@@ -185,7 +185,7 @@ export function helpCard(agentName = 'Agent'): object {
         '**命令列表**',
         '',
         '- `/new` `/reset` — 清空当前 chat 的会话',
-        '- `/new chat [name]` — 新建群+新会话，自动拉你进群',
+        '- `/new chat [name]` — 新建群+新会话，自动拉你进群，群主为你本人',
         '- `/resume [N]` — 列出并恢复历史会话（最多 N 条）',
         '- `/cd <path>` — 切换工作目录（会重置 session）',
         '- `/ws list|save <name>|use <name>|remove <name>` — 工作目录',

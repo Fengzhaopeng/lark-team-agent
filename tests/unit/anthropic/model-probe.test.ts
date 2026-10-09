@@ -67,8 +67,27 @@ describe('chat capability', () => {
 });
 
 describe('image generation capability', () => {
-  it('accepts a plain 200', () => {
+  it('accepts a 200 carrying an image result', () => {
     expect(isImageCapable(res(200, { data: [{ url: 'https://x/y.png' }] }))).toBe(true);
+    expect(isImageCapable(res(200, { data: [{ b64_json: 'AAAA' }] }))).toBe(true);
+  });
+
+  it('accepts a provider-specific data.image_urls response', () => {
+    expect(isImageCapable(res(200, { data: { image_urls: ['https://x/y.png'] } }))).toBe(true);
+  });
+
+  it('rejects HTTP 200 carrying an upstream error object', () => {
+    expect(
+      isImageCapable(
+        res(200, {
+          error: { message: 'invalid params, unsupported model: MiniMax-M2.7', code: '2013' },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects HTTP 200 without an image payload', () => {
+    expect(isImageCapable(res(200, { ok: true }))).toBe(false);
   });
 
   it('accepts a size rejection as capable', () => {
@@ -79,6 +98,15 @@ describe('image generation capability', () => {
         res(400, { error: { message: 'The parameter `size` specified in the request is not valid' } }),
       ),
     ).toBe(true);
+  });
+
+  it('rejects generic invalid-value errors unrelated to dimensions', () => {
+    expect(
+      isImageCapable(res(400, { error: { message: 'invalid_value: unsupported model' } })),
+    ).toBe(false);
+    expect(
+      isImageCapable(res(400, { error: { message: 'The model is not valid for this endpoint' } })),
+    ).toBe(false);
   });
 
   it('rejects a model with no upstream channel', () => {

@@ -135,7 +135,7 @@ ANTHROPIC_API_KEY_POOL=sk-ant-yyy,sk-ant-zzz  # 备用 key，逗号分隔
 | 指令 | 效果 |
 |------|------|
 | `/new` / `/reset` | 清除当前 session，开始新对话 |
-| `/new chat [名称]` | 新建飞书群并关联 session，自动继承当前工作目录 |
+| `/new chat [名称]` | 新建飞书群并关联 session，自动继承当前工作目录，群主设为发起人本人 |
 | `/resume` | 查看并恢复历史 session |
 | `/stop` | 停止当前正在运行的任务 |
 | `/timeout [N\|off\|default]` | 设置或清除当前 session 的空闲超时 |

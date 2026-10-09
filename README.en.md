@@ -103,7 +103,7 @@ New team members are greeted automatically — no manual setup or documentation-
 | Command | Effect |
 |---------|--------|
 | `/new` / `/reset` | Clear the current session |
-| `/new chat [name]` | Create a Feishu group chat bound to a new session, inheriting the current working directory |
+| `/new chat [name]` | Create a Feishu group chat bound to a new session, inheriting the current working directory; the invoker becomes the group owner |
 | `/resume` | Browse and restore compatible history sessions |
 | `/stop` | Stop the current run |
 | `/timeout [N\|off\|default]` | Set or clear the session idle watchdog |

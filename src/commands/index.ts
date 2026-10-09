@@ -90,7 +90,7 @@ import type { WorkspaceStore } from '../workspace/store';
 import { createBoundChat, defaultChatName } from '../bot/group';
 import { fetchKnownChats, type KnownChat } from '../bot/lark-info';
 import { applyLarkCliIdentityPolicy, hasStructuredLarkCliUserAuth } from '../lark-cli/identity-policy';
-import { fetchModels, filterByCapability, filterChatModels, formatFetchModelsError, groupModels } from '../anthropic/models';
+import { fetchModels, filterByCapability, filterChatModels, formatFetchModelsError, groupModels, keepLatestVersions } from '../anthropic/models';
 import { loadCapabilityCache, probeAllModels, saveCapabilityCache, type CapabilityCache, type ModelCapability } from '../anthropic/model-probe';
 
 export interface Controls {
@@ -358,12 +358,19 @@ async function handleNewChat(rawName: string, ctx: CommandContext): Promise<void
   const sourceCwd = effectiveWorkspaceCwd(ctx);
   const name = rawName || defaultChatName(ctx.agent.displayName);
 
+  // The invoker owns the group they just asked for: they can rename it, invite
+  // colleagues and remove the bot without going through us. A bot sender (or an
+  // event that omits `sender_type`) can't own a group, so fall back to the bot
+  // being owner rather than letting the create call fail.
+  const ownerOpenId = ctx.msg.senderIsBot ? undefined : ctx.msg.senderId;
+
   let created;
   try {
     created = await createBoundChat({
       channel: ctx.channel,
       name,
       inviteOpenId: ctx.msg.senderId,
+      ownerOpenId,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -393,9 +400,11 @@ async function handleNewChat(rawName: string, ctx: CommandContext): Promise<void
   }
 
   // Welcome the user inside the new group with a hint about how to start.
+  // Mention ownership so they know they can manage the group themselves.
+  const ownerHint = ownerOpenId ? '（你是群主）' : '';
   const welcome = inheritCwd
-    ? `🎉 群已建好，工作目录：\`${inheritCwd}\`\n\n@我 + 任意消息开始对话。`
-    : '🎉 群已建好。\n\n@我 + 任意消息开始对话。';
+    ? `🎉 群已建好${ownerHint}，工作目录：\`${inheritCwd}\`\n\n@我 + 任意消息开始对话。`
+    : `🎉 群已建好${ownerHint}。\n\n@我 + 任意消息开始对话。`;
   try {
     await ctx.channel.send(created.chatId, { markdown: welcome });
   } catch (err) {
@@ -920,11 +929,9 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
       await reply(ctx, `❌ 获取模型列表失败：${formatFetchModelsError(listResult.error)}`);
       return;
     }
-    const allIds = listResult.models.map((m) => m.id);
-    let done = 0;
-    const records = await probeAllModels(allIds, {
-      onProgress: (_done, total, _id) => { done = _done; void total; },
-    });
+    const allIds = [...new Set(listResult.models.map((m) => m.id))];
+    const startedAt = Date.now();
+    const records = await probeAllModels(allIds);
     await saveCapabilityCache(cachePath, records);
     const count = (cap: ModelCapability) => records.filter((r) => r.capabilities.includes(cap)).length;
     const chat = count('chat');
@@ -933,20 +940,39 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
     const reason = count('reasoning');
     const img = count('image-gen');
     const vid = count('video-gen');
-    const none = records.filter((r) => r.capabilities.length === 0).length;
+    const noneRecords = records.filter((r) => r.capabilities.length === 0);
+    const none = noneRecords.length;
+    const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
+    const liveIds = new Set(allIds);
+    const imageLatest = keepLatestVersions(
+      records
+        .filter((r) => liveIds.has(r.modelId) && r.capabilities.includes('image-gen'))
+        .map((r) => ({ id: r.modelId })),
+    );
+    const videoLatest = keepLatestVersions(
+      records
+        .filter((r) => liveIds.has(r.modelId) && r.capabilities.includes('video-gen'))
+        .map((r) => ({ id: r.modelId })),
+    );
+    const noCapabilityPreview = noneRecords.slice(0, 12).map((r) => `\`${r.modelId}\``).join('、');
     await reply(
       ctx,
       [
-        `✅ 探测完成（共 ${records.length} 个模型，各项能力可重叠）`,
+        `✅ 探测完成（共 ${records.length} 个模型，耗时 ${elapsedSeconds}s；各项能力可重叠）`,
         `- 💬 对话（chat）：${chat} 个`,
         `- 🔧 工具调用（tool-call）：${tool} 个`,
         `- 👁 图片输入（vision）：${vision} 个`,
         `- 🧠 思考输出（reasoning）：${reason} 个`,
-        `- 🎨 图像生成（/image）：${img} 个`,
-        `- 🎬 视频生成（/video）：${vid} 个`,
-        ...(none > 0 ? [`- ❓ 无任何能力：${none} 个`] : []),
+        `- 🎨 图像生成（/image）：${img} 个；最高版本视图 ${imageLatest.models.length} 个，隐藏历史版本 ${imageLatest.dropped.length} 个`,
+        `- 🎬 视频生成（/video）：${vid} 个；最高版本视图 ${videoLatest.models.length} 个，隐藏历史版本 ${videoLatest.dropped.length} 个`,
+        ...(none > 0 ? [
+          `- ❓ 无任何已验证能力：${none} 个`,
+          `  ${noCapabilityPreview}${none > 12 ? ` 等 ${none} 个` : ''}`,
+          '  这表示当前网关/权限/端点下未验证成功，不等同于厂商官方一定不支持。',
+        ] : []),
         '',
-        '用 `/model list` 查看对话模型，`/image` 或 `/video` 直接生成媒体。',
+        '探测结果保存全量能力记录；`/model list` 仅展示同产品线/规格的最高版本。',
+        '用 `/model list` 查看模型，`/image` 或 `/video` 直接生成媒体。',
       ].join('\n'),
     );
     return;
@@ -972,9 +998,19 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
     const lines: string[] = [`**模型列表**（${cacheNote}）\n`];
 
     // ── 对话模型 ─────────────────────────────────────────
-    const chatModels = filterChatModels(result.models, probeCache);
+    // Gateways list every historical snapshot, so collapse each product line to
+    // its newest generation before rendering. The active model is pinned so the
+    // `← 当前` marker can never point at a row we just hid.
+    const chatAll = filterChatModels(result.models, probeCache);
+    const chatPruned = keepLatestVersions(chatAll, { alwaysKeep: current ? [current] : [] });
+    const chatModels = chatPruned.models;
     const chatGroups = groupModels(chatModels);
-    lines.push(`**💬 对话模型**（${chatModels.length} 个，可用于 \`/model\` 切换）`);
+    const hiddenChats = chatPruned.dropped.length;
+    lines.push(
+      `**💬 对话模型**（${chatModels.length} 个，可用于 \`/model\` 切换`
+        + (hiddenChats > 0 ? `；已隐藏 ${hiddenChats} 个历史版本` : '')
+        + '）',
+    );
     if (probeCache) {
       const chatIds = new Set(chatModels.map((m) => m.id));
       const among = (cap: ModelCapability) =>
@@ -993,9 +1029,15 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
 
     if (probeCache) {
       // ── 生图模型 ───────────────────────────────────────
-      const imgModels = filterByCapability(result.models, 'image-gen', probeCache);
+        const imgAll = filterByCapability(result.models, 'image-gen', probeCache);
+      const imgPruned = keepLatestVersions(imgAll);
+      const imgModels = imgPruned.models;
       if (imgModels.length > 0) {
-        lines.push(`**🎨 生图模型**（${imgModels.length} 个，用 \`/image\` 调用）`);
+        lines.push(
+          `**🎨 生图模型**（${imgModels.length} 个，用 \`/image\` 调用`
+            + (imgPruned.dropped.length > 0 ? `；已隐藏 ${imgPruned.dropped.length} 个历史版本` : '')
+            + '）',
+        );
         for (const m of groupModels(imgModels)) {
           lines.push(`\n_${m.label}_`);
           m.models.forEach((x) => lines.push(`- \`${x.id}\``));
@@ -1004,9 +1046,15 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
       }
 
       // ── 生视频模型 ────────────────────────────────────
-      const vidModels = filterByCapability(result.models, 'video-gen', probeCache);
+      const vidAll = filterByCapability(result.models, 'video-gen', probeCache);
+      const vidPruned = keepLatestVersions(vidAll);
+      const vidModels = vidPruned.models;
       if (vidModels.length > 0) {
-        lines.push(`**🎬 生视频模型**（${vidModels.length} 个，用 \`/video\` 调用）`);
+        lines.push(
+          `**🎬 生视频模型**（${vidModels.length} 个，用 \`/video\` 调用`
+            + (vidPruned.dropped.length > 0 ? `；已隐藏 ${vidPruned.dropped.length} 个历史版本` : '')
+            + '）',
+        );
         for (const m of groupModels(vidModels)) {
           lines.push(`\n_${m.label}_`);
           m.models.forEach((x) => lines.push(`- \`${x.id}\``));
@@ -1015,6 +1063,9 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
       }
     }
 
+    if (hiddenChats > 0) {
+      lines.push('_同系列仅显示最新版本；历史版本仍可通过 `/model <完整模型名>` 直接指定。_');
+    }
     lines.push('用 `/model <模型名>` 切换对话模型，`/model --global <模型名>` 改全局默认。');
     await reply(ctx, lines.join('\n'));
     return;

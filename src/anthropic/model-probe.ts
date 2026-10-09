@@ -46,6 +46,17 @@
  *      404 → model not present on this gateway.
  *      400 + "Unsupported parameter: 'max_tokens'" → model is chat-capable but
  *          belongs to the Responses-API generation and needs `max_completion_tokens`.
+ *      400 + "Function tools with reasoning_effort are not supported … in
+ *          /v1/chat/completions" → tools and `reasoning_effort` are mutually
+ *          exclusive on the chat endpoint; the model supports BOTH, just not at
+ *          the same time. We never send `reasoning_effort`, so this probe is
+ *          unaffected — but never add it, or gpt-5.6-{sol,terra,luna} would be
+ *          mislabelled as tool-incapable.
+ *
+ * 5. Auth header differs per endpoint on the Unipus gateways: `/v1/models`
+ *    accepts `x-api-key`, while `/v1/chat/completions` accepts ONLY
+ *    `Authorization: Bearer`. Using the wrong one yields a blanket
+ *    `401 Invalid token` that looks like a dead key.
  *
  * NOTE: this file is the TypeScript twin of the `unipus-model-sync` skill; when
  * the judging rules change, update both.
@@ -184,17 +195,35 @@ export function isChatCapable(res: ProbeResponse): boolean {
 }
 
 export function isImageCapable(res: ProbeResponse): boolean {
-  if (res.status === 200) return true;
+  // Some gateways return HTTP 200 even when the JSON body contains an upstream
+  // error. Treat success as capability only when the response actually carries
+  // image data; otherwise MiniMax chat models such as M2.7 can be false positives.
+  if (res.status === 200) {
+    const body = res.body as Record<string, unknown> | null;
+    if (body?.['error']) return false;
+    const data = body?.['data'];
+    if (Array.isArray(data)) {
+      return data.some((item) => {
+        const record = item as Record<string, unknown> | null;
+        return !!(record?.['url'] || record?.['b64_json']);
+      });
+    }
+    // Provider-specific image responses may use data.image_urls (MiniMax native
+    // shape) after a gateway adapter translates the endpoint.
+    if (data && typeof data === 'object') {
+      const urls = (data as Record<string, unknown>)['image_urls'];
+      return Array.isArray(urls) && urls.length > 0;
+    }
+    return false;
+  }
   if (res.status !== 400) return false;
-  // A 400 about size/params means the model does generate images but rejects the
-  // probe dimensions (e.g. doubao-seedream requires ≥3686400 px) — still capable.
+  // A 400 about an image-dimension field means the route accepted the model but
+  // rejected our generic probe dimensions. Generic `invalid_value` / `not valid`
+  // text is not enough: it may describe an unsupported model or endpoint.
   const text = errorText(res.body);
-  return (
-    text.includes('size') ||
-    text.includes('invalid_value') ||
-    text.includes('supported size') ||
-    text.includes('not valid')
-  );
+  const dimensionField = /(size|width|height|resolution|aspect[_ -]?ratio)/.test(text);
+  const dimensionRejection = /(invalid|not valid|unsupported|support|minimum|maximum|range|must)/.test(text);
+  return dimensionField && dimensionRejection;
 }
 
 export function isVideoCapable(res: ProbeResponse): boolean {

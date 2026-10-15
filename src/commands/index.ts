@@ -1150,6 +1150,15 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
   );
 }
 
+// 图像生成内置通道：已实测可用的模型（不依赖 /model scan）
+const BUILTIN_IMAGE_MODELS = [
+  'gpt-image-2.5-flare',
+  'gpt-image-2.5-sunburst',
+  'gpt-image-1',
+  'doubao-seedream-4-5-251128',
+];
+const BUILTIN_IMAGE_DEFAULT = 'gpt-image-2.5-flare';
+
 // ── Media generation (/image, /video) ──────────────────────────────────────
 
 async function handleMediaGen(args: string, ctx: CommandContext): Promise<void> {
@@ -1175,7 +1184,10 @@ async function handleMediaGen(args: string, ctx: CommandContext): Promise<void> 
       `**${label}** \`${cmd} <描述> [--model <模型ID>] [--size <尺寸>]\``,
       '',
     ];
-    if (probeCache) {
+    if (capability === 'image-gen') {
+      lines.push('可用模型（内置通道）：', ...BUILTIN_IMAGE_MODELS.map((m) => `- \`${m}\``));
+      lines.push('', `默认模型：\`${BUILTIN_IMAGE_DEFAULT}\``);
+    } else if (probeCache) {
       const available = probeCache.models
         .filter((m) => m.capabilities.includes(capability))
         .map((m) => `- \`${m.modelId}\``);
@@ -1191,17 +1203,21 @@ async function handleMediaGen(args: string, ctx: CommandContext): Promise<void> 
     return;
   }
 
-  if (!probeCache) {
+  if (!probeCache && capability !== 'image-gen') {
     await reply(
       ctx,
-      `❌ 尚未探测模型能力。请先执行 \`/model scan\` 获取可用的${capability === 'video-gen' ? '视频' : '图像'}生成模型列表。`,
+      `❌ 尚未探测模型能力。请先执行 \`/model scan\` 获取可用的视频生成模型列表。`,
     );
     return;
   }
 
-  const availableIds = probeCache.models
+  const probedIds = (probeCache?.models ?? [])
     .filter((m) => m.capabilities.includes(capability))
     .map((m) => m.modelId);
+  const availableIds =
+    capability === 'image-gen'
+      ? Array.from(new Set([...BUILTIN_IMAGE_MODELS, ...probedIds]))
+      : probedIds;
 
   if (availableIds.length === 0) {
     await reply(
@@ -1223,7 +1239,9 @@ async function handleMediaGen(args: string, ctx: CommandContext): Promise<void> 
   const effectiveDefault =
     configDefaultModel && availableIds.includes(configDefaultModel)
       ? configDefaultModel
-      : availableIds[0]!;
+      : capability === 'image-gen'
+        ? BUILTIN_IMAGE_DEFAULT
+        : availableIds[0]!;
   let modelId = effectiveDefault;
 
   // Try --model <id> first

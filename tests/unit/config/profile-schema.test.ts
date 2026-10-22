@@ -87,17 +87,38 @@ describe('profile schema', () => {
     ).toBe('bot-only');
   });
 
-  it('isUserAuthModeActive stays off in team mode even with a stale user-default identityPreset', () => {
-    // This is the exact scenario the team-mode fusion fix targets: a profile
-    // switched into team mode still carries whatever identityPreset was last
-    // saved in personal mode (savePreferencesConfig stores it verbatim so it
-    // comes back into effect when switching back). Per-user OAuth must not
-    // activate here — team mode's "bot-only" guarantee has to win.
+  it('isUserAuthModeActive: team mode needs multiUser, personal mode also needs user-default', () => {
+    // team + multiUser => per-user OAuth on (each sender acts as themselves),
+    // regardless of the stored identityPreset (it only governs the global dir).
     expect(
       isUserAuthModeActive({
         mode: 'team',
         larkCli: { identityPreset: 'user-default' },
         multiUser: { enabled: true, workspaceRoot: '/workspace' },
+      }),
+    ).toBe(true);
+
+    expect(
+      isUserAuthModeActive({
+        mode: 'team',
+        larkCli: { identityPreset: 'bot-only' },
+        multiUser: { enabled: true, workspaceRoot: '/workspace' },
+      }),
+    ).toBe(true);
+
+    // team without multiUser => pure bot-only, never any personal identity.
+    expect(
+      isUserAuthModeActive({
+        mode: 'team',
+        larkCli: { identityPreset: 'user-default' },
+      }),
+    ).toBe(false);
+
+    expect(
+      isUserAuthModeActive({
+        mode: 'team',
+        larkCli: { identityPreset: 'user-default' },
+        multiUser: { enabled: false, workspaceRoot: '/workspace' },
       }),
     ).toBe(false);
 

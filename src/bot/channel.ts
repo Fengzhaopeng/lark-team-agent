@@ -78,7 +78,7 @@ import {
 import { UserRegistry } from '../multi-user/user-registry';
 import { buildWelcomeMessage } from '../multi-user/onboarding';
 import { UserTokenRegistry } from '../multi-user/user-token-registry';
-import { buildOAuthPromptMarkdown } from '../card/oauth-prompt-card';
+import { buildOAuthPromptCardJson, buildOAuthPromptMarkdown } from '../card/oauth-prompt-card';
 import { maybeRefreshCapabilityCache } from '../anthropic/model-probe';
 
 const DEBOUNCE_MS = 600;
@@ -1608,12 +1608,19 @@ async function startUserAuthFlow(input: {
     const expiresInMinutes = authResult.expiresIn
       ? Math.max(1, Math.round(authResult.expiresIn / 60))
       : undefined;
-    const authMarkdown = buildOAuthPromptMarkdown({
-      verificationUrl: authResult.verificationUrl,
-      expiresInMinutes,
-    });
-    // Send the auth prompt to the user's private chat (open_id routing).
-    await channel.send(senderId, { markdown: authMarkdown });
+    const promptOpts = { verificationUrl: authResult.verificationUrl, expiresInMinutes };
+    // Send the auth prompt to the user's private chat (open_id routing) as an
+    // interactive card; fall back to a plain markdown link if the card is
+    // rejected so the user is never left without a usable authorization link.
+    try {
+      await channel.send(senderId, { card: buildOAuthPromptCardJson(promptOpts) });
+    } catch (cardErr) {
+      log.warn('user-auth', 'card-send-failed-fallback-markdown', {
+        sender: senderId.slice(-6),
+        err: cardErr instanceof Error ? cardErr.message : String(cardErr),
+      });
+      await channel.send(senderId, { markdown: buildOAuthPromptMarkdown(promptOpts) });
+    }
     // Notify in the current chat that auth is required.
     await channel.send(chatId, {
       markdown: '🔐 需要飞书授权才能以你的身份操作文档，授权链接已私信发给你，完成后请重新发送消息。',

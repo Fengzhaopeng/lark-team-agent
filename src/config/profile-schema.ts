@@ -135,17 +135,28 @@ export function effectiveLarkCliIdentity(
 
 /**
  * True when per-user Feishu OAuth (personal identity, isolated token per
- * sender) is actually in effect for this profile — i.e. multi-user is on
- * AND the *effective* lark-cli identity (after the team-mode override) is
- * `user-default`. Team mode forces bot-only regardless of what
- * `larkCli.identityPreset` was last saved as, so every call site that gates
- * or triggers per-user OAuth (registry construction, the sentinel-auth
- * prompt, etc.) must check this instead of reading `identityPreset` raw.
+ * sender) is actually in effect for this profile.
+ *
+ * - personal mode: multi-user on AND identityPreset === 'user-default'.
+ * - team mode:     multi-user on is enough. Team mode still forces the
+ *   *global* lark-cli config to bot-only (effectiveLarkCliIdentity), which is
+ *   the safe fallback for senders without a token; per-user dirs carry their
+ *   own user identity. Without multiUser, team mode is pure bot-only.
+ *
+ * Every call site that gates or triggers per-user OAuth (registry
+ * construction, the sentinel-auth prompt, etc.) must go through here.
  */
 export function isUserAuthModeActive(
   profile: Pick<ProfileConfig, 'mode' | 'larkCli' | 'multiUser'>,
 ): boolean {
-  return profile.multiUser?.enabled === true && effectiveLarkCliIdentity(profile) === 'user-default';
+  if (profile.multiUser?.enabled !== true) return false;
+  // Team mode + multiUser: open access (no allowlist) but every sender acts
+  // under their OWN Feishu identity. The profile-level (global) lark-cli
+  // config stays bot-only — see effectiveLarkCliIdentity — so a sender with no
+  // token of their own can never inherit someone else's. identityPreset is
+  // irrelevant here: it only governs the global config, not per-user dirs.
+  if (profile.mode === 'team') return true;
+  return profile.larkCli.identityPreset === 'user-default';
 }
 
 export interface RootConfig {

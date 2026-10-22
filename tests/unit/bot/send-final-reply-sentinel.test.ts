@@ -86,7 +86,7 @@ describe('sendFinalReply on-demand auth sentinel', () => {
     expect(startAuth).toHaveBeenCalledWith('ou_sender', {
       appId: 'cli_test',
       brand: 'feishu',
-      extraArgs: ['--recommend'],
+      extraArgs: ['--domain', 'docs,drive,sheets,wiki,im'],
     });
     // Private DM with the verification link.
     expect(channel.sent).toContainEqual(

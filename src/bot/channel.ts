@@ -77,6 +77,7 @@ import {
 } from './cot';
 import { UserRegistry } from '../multi-user/user-registry';
 import { buildWelcomeMessage } from '../multi-user/onboarding';
+import { authDomainArgs, detectAuthNeed, type AuthNeed } from '../multi-user/auth-scopes';
 import { UserTokenRegistry } from '../multi-user/user-token-registry';
 import { buildOAuthPromptCardJson, buildOAuthPromptMarkdown } from '../card/oauth-prompt-card';
 import { maybeRefreshCapabilityCache } from '../anthropic/model-probe';
@@ -1210,6 +1211,52 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   };
 
+  // Proactive auth: when a lark-cli call fails because the SENDER has no usable
+  // token / lacks a scope, push the authorization card ourselves instead of
+  // hoping the agent tells the user. One card per run (and never while a flow is
+  // already pending); bot-identity failures are ignored by detectAuthNeed.
+  let authCardPushed = false;
+  const onToolResult =
+    userTokenRegistry && userAuthMode
+      ? (evt: Extract<AgentEvent, { type: 'tool_result' }>): void => {
+          if (authCardPushed) return;
+          const need: AuthNeed | undefined = detectAuthNeed(evt.output, evt.isError);
+          if (!need) return;
+          const senderId = firstMsg.senderId;
+          // token_missing for a user the registry still believes is ready means the
+          // token vanished (e.g. keyring wiped on container rebuild): reset and re-auth.
+          if (need.kind === 'token_missing' && !userTokenRegistry.needsAuth(senderId)) {
+            userTokenRegistry.markNeedsAuth(senderId);
+          }
+          if (userTokenRegistry.isPending(senderId)) return;
+          authCardPushed = true;
+          log.info('user-auth', 'proactive', {
+            sender: senderId.slice(-6),
+            kind: need.kind,
+            domains: need.domains,
+            chatType: firstMsg.chatType,
+          });
+          void startUserAuthFlow({
+            channel,
+            userTokenRegistry,
+            senderId,
+            chatId,
+            sendOpts,
+            appId: appId ?? controls.profileConfig.accounts.app.id,
+            appBrand: appBrand ?? controls.profileConfig.accounts.app.tenant,
+            extraDomains: need.domains,
+            reason:
+              need.kind === 'scope_missing'
+                ? '这一步需要你额外授权一项权限，授权后我会继续。'
+                : '需要你的飞书授权才能以你的身份完成这一步。',
+          }).catch((err: unknown) => {
+            log.warn('user-auth', 'proactive-failed', {
+              err: err instanceof Error ? err.message : String(err),
+            });
+          });
+        }
+      : undefined;
+
   // Resolve idle-timeout for this run: scope override (on SessionEntry) wins
   // over global default (preferences). 0 / undefined = no watchdog.
   const scopeOverride = sessions.getIdleTimeoutMinutes(scope);
@@ -1282,6 +1329,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           idleTimeoutMs,
           recordSession,
           async () => {},
+          onToolResult,
         );
         await cotDone;
         if (cotPublisher.degradedReason) {
@@ -1326,6 +1374,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             await cardCtrl.update(renderCard(filterForPrefs(state), cardRenderOptions));
           }
         },
+        onToolResult,
       );
       const streamDone = channel.stream(
         chatId,
@@ -1391,6 +1440,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             await markdownCtrl.setContent(renderText(filterForPrefs(state)));
           }
         },
+        onToolResult,
       );
       const streamDone = channel.stream(
         chatId,
@@ -1446,6 +1496,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         idleTimeoutMs,
         recordSession,
         async () => {},
+        onToolResult,
       );
       await sendFinalReply({
         channel,
@@ -1597,18 +1648,26 @@ async function startUserAuthFlow(input: {
   sendOpts: { replyTo: string; replyInThread?: boolean };
   appId: string;
   appBrand?: string;
+  /** On-demand domains (beyond the default set) the failing command needs. */
+  extraDomains?: readonly string[];
+  /** Why we are asking, shown on the card (e.g. "需要日历权限"). */
+  reason?: string;
 }): Promise<void> {
   const { channel, userTokenRegistry, senderId, chatId, sendOpts, appId, appBrand } = input;
   try {
     const authResult = await userTokenRegistry.startAuth(senderId, {
       appId,
       brand: appBrand,
-      extraArgs: ['--recommend'],
+      extraArgs: authDomainArgs(input.extraDomains),
     });
     const expiresInMinutes = authResult.expiresIn
       ? Math.max(1, Math.round(authResult.expiresIn / 60))
       : undefined;
-    const promptOpts = { verificationUrl: authResult.verificationUrl, expiresInMinutes };
+    const promptOpts = {
+      verificationUrl: authResult.verificationUrl,
+      expiresInMinutes,
+      ...(input.reason ? { reason: input.reason } : {}),
+    };
     // Send the auth prompt to the user's private chat (open_id routing) as an
     // interactive card; fall back to a plain markdown link if the card is
     // rejected so the user is never left without a usable authorization link.
@@ -1699,6 +1758,7 @@ async function processAgentStream(
   idleTimeoutMs: number | undefined,
   recordSession: (event: AgentEvent) => void,
   flush: (state: RunState) => Promise<void>,
+  onToolResult?: (evt: Extract<AgentEvent, { type: 'tool_result' }>) => void,
 ): Promise<RunState> {
   const runStart = Date.now();
   let state: RunState = initialState;
@@ -1752,6 +1812,13 @@ async function processAgentStream(
       } else if (evt.type === 'tool_result') {
         inFlightTools.delete(evt.id);
         log.info('agent', 'tool-done', { inFlight: inFlightTools.size });
+        try {
+          onToolResult?.(evt);
+        } catch (err) {
+          log.warn('agent', 'on-tool-result-failed', {
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
       armOrPauseIdle();
 

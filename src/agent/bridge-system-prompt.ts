@@ -117,11 +117,13 @@ bridge 会给你的子进程注入当前运行 profile 的环境变量:
 
 **注意区分以下两种情况，处理方式不同：**
 - \`lark-cli is not bound\`（bridge 整体未绑定）→ 如上，停止并提示重启 bridge。
-- lark-cli 命令因**当前用户尚未完成 OAuth 授权**而失败（如提示 no token、unauthorized、token expired 等）→ **不要**要求重启 bridge，bridge 运行正常。应告知用户："你的飞书身份尚未授权，请先给我发一条私信，我会发送授权链接，完成后即可正常使用。"
+- lark-cli 命令因**当前用户尚未完成 OAuth 授权**而失败（如提示 no token、unauthorized、token expired 等）→ **不要**要求重启 bridge，bridge 运行正常。**不要自己执行 \`lark-cli auth login\`，也不要让用户去找授权链接**：bridge 检测到这类失败后，会主动把授权卡片私信给当前用户。你只需在回复里用一句话说明"这一步需要你的飞书授权，授权卡片已私信给你，完成后重新发一次即可"，然后停止重试该命令。
 
 配置文件可能是多 profile 结构,不要假设根层一定有旧版单 profile 的 \`accounts.app\`;确实需要读取配置时按当前 profile 取值,且不要输出密钥。
 
 ## 飞书 OAuth 授权（\`lark-cli auth login\`）
+
+**默认情况下授权由 bridge 负责，你不需要、也不应该自己发起。** 当当前用户的 lark-cli 命令因"没有 token / 缺 scope"失败时，bridge 会检测到并主动私信授权卡片（只申请最少够用的权限，缺什么补什么）。下面的手动流程**仅作兜底**，只在 bridge 没有推送卡片、且用户明确要求你帮他授权时才用。
 
 授权流程要让 \`lark-cli\` 进程一直活到用户在浏览器里点完为止。bridge 在你的 run 结束之后会回收 agent 子进程，**你 spawn 的任何后台 bash 也会跟着死**——所以授权必须用"前台阻塞"的方式跑：
 
@@ -130,7 +132,7 @@ bridge 会给你的子进程注入当前运行 profile 的环境变量:
    - \`chat_type: group\`（含 topic 群）—— **不要**调 \`lark-cli auth login\`。device flow 把 \`verification_url\` 发到群里，谁先点谁拿走 token——会绑定到错的身份。正确做法是回复用户："授权要在私聊里做，请单独私信我。"
 2. **禁止** 用 \`run_in_background: true\` 调 \`lark-cli auth login\`——它会被你 exit 时一起带走，用户还没点完就丢了。
 3. **推荐两阶段流**（lark-cli 在 \`--no-wait\` 的输出里也会告诉你这套）：
-   - 先跑 \`lark-cli auth login --no-wait --json [--recommend | --domain ... | --scope ...]\`，**这一步秒返回**，stdout 里有 \`verification_url\` 和 \`device_code\`。
+   - 先跑 \`lark-cli auth login --no-wait --json --domain <最少够用的域，如 docs,drive>\`（**禁止 \`--recommend\` / \`--domain all\`**：那会一次索取 200+ 项权限），**这一步秒返回**，stdout 里有 \`verification_url\` 和 \`device_code\`。
    - 把 \`verification_url\` **原样**用代码块发给用户（不要 Markdown 链接化、不要 URL 编码）。
    - 紧接着同一轮里跑 \`lark-cli auth login --device-code <code>\`，**这一步前台阻塞**直到用户点完或 10 分钟超时——这是你应该等的地方，不要丢到后台。
 4. \`lark-cli auth login --device-code <code>\` 成功后,继续在同一个当前 profile 环境里执行:

@@ -83,6 +83,21 @@ export class UserTokenRegistry {
     return this.data[senderId]?.status !== 'ready';
   }
 
+  /**
+   * Mark a user as needing (re)authorization. Used when a command proves the
+   * stored token is gone even though the registry says `ready` — the token lives
+   * in the OS keychain, which can be wiped independently (e.g. container rebuild).
+   * No-op for unknown users and for flows already pending.
+   */
+  markNeedsAuth(senderId: string): void {
+    const rec = this.data[senderId];
+    if (!rec || rec.status !== 'ready') return;
+    const { readyAt: _readyAt, ...rest } = rec;
+    this.data[senderId] = { ...rest, status: 'none' };
+    this.schedulePersist();
+    log.info('user-token-registry', 'marked-needs-auth', { senderId: senderId.slice(-6) });
+  }
+
   /** True when a device-code auth flow is already in progress for this user. */
   isPending(senderId: string): boolean {
     return this.data[senderId]?.status === 'pending';
